@@ -20,10 +20,13 @@ import {
   ChevronRight,
   ChevronLeft,
   FolderOpen,
-  Sliders,
+  Radio,
+  Loader2,
+  Wand2,
 } from 'lucide-react';
 import { Audiobook, Sentence, WordCue, SRSFlashcard, Chapter } from '../types';
 import { audioEngine } from '../utils/audioEngine';
+import { chunkTranscriber } from '../utils/chunkAudioTranscriber';
 import { SidePanel, SidePanelMode } from './SidePanel';
 import confetti from 'canvas-confetti';
 
@@ -46,16 +49,23 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
 }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  const [realDuration, setRealDuration] = useState<number>(0);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
   const [showPortuguese, setShowPortuguese] = useState<boolean>(true);
   const [blurEnglish, setBlurEnglish] = useState<boolean>(false);
   const [repeatSentenceMode, setRepeatSentenceMode] = useState<boolean>(false);
   const [savedSentenceId, setSavedSentenceId] = useState<string | null>(null);
 
-  // Multi-chapter state
+  // Progressive JIT Transcription State
+  const [autoTranscribeActive, setAutoTranscribeActive] = useState<boolean>(true);
+  const [batchTranscribing, setBatchTranscribing] = useState<boolean>(false);
+  const [transcribingSlices, setTranscribingSlices] = useState<Set<number>>(new Set());
+
+  // Dynamic sentence store allowing progressive updates to the current chapter
   const [currentChapterIdx, setCurrentChapterIdx] = useState<number>(
     audiobook.currentChapterIndex || 0
   );
+  const [dynamicSentences, setDynamicSentences] = useState<Sentence[]>([]);
 
   // UNIFIED SIDE PANEL STATE (Never covers text!)
   const [sidePanelMode, setSidePanelMode] = useState<SidePanelMode | null>(null);
@@ -69,21 +79,22 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const playTimerRef = useRef<number | null>(null);
 
-  // Reset when audiobook changes
+  const currentChapter: Chapter | undefined = audiobook.chapters?.[currentChapterIdx];
+  const activeAudioSrc: string = currentChapter?.audioUrl || audiobook.audioUrl || '';
+
+  // Synchronize sentences when chapter or audiobook changes
   useEffect(() => {
     setCurrentChapterIdx(audiobook.currentChapterIndex || 0);
     setCurrentTime(0);
+    setRealDuration(0);
     setIsPlaying(false);
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
     }
-  }, [audiobook.id]);
-
-  const currentChapter: Chapter | undefined = audiobook.chapters?.[currentChapterIdx];
-  const activeSentences: Sentence[] = currentChapter?.sentences || audiobook.sentences || [];
-  const activeDuration: number = currentChapter?.duration || audiobook.duration || 60;
-  const activeAudioSrc: string = currentChapter?.audioUrl || audiobook.audioUrl || '';
+    const initial = currentChapter?.sentences || audiobook.sentences || [];
+    setDynamicSentences(initial);
+  }, [audiobook.id, currentChapterIdx]);
 
   // Synchronize playback speed with audio element
   useEffect(() => {
@@ -92,12 +103,18 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     }
   }, [playbackSpeed]);
 
+  // Real duration calculation (100% exact from audio hardware or chapter metadata)
+  const displayDuration =
+    realDuration > 0
+      ? realDuration
+      : currentChapter?.duration || audiobook.duration || 60;
+
   // Active sentence & word
-  const activeSentenceIndex = activeSentences.findIndex(
+  const activeSentenceIndex = dynamicSentences.findIndex(
     (s) => currentTime >= s.start && currentTime <= s.end
   );
   const activeSentence =
-    activeSentenceIndex !== -1 ? activeSentences[activeSentenceIndex] : null;
+    activeSentenceIndex !== -1 ? dynamicSentences[activeSentenceIndex] : null;
 
   const activeWordCue = activeSentence?.words.find(
     (w) => currentTime >= w.start && currentTime <= w.end
@@ -114,44 +131,83 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     }
   }, [activeWordCue?.word, isPlaying]);
 
-  // Audio timer fallback when no hardware audio is playing
-  useEffect(() => {
-    if (isPlaying && !activeAudioSrc) {
-      const intervalMs = 50;
-      playTimerRef.current = window.setInterval(() => {
-        setCurrentTime((prev) => {
-          const nextTime = prev + (intervalMs / 1000) * playbackSpeed;
-          if (repeatSentenceMode && activeSentence && nextTime >= activeSentence.end) {
-            return activeSentence.start;
-          }
-          if (nextTime >= activeDuration) {
-            if (audiobook.chapters && currentChapterIdx < audiobook.chapters.length - 1) {
-              switchChapter(currentChapterIdx + 1);
-              return 0;
-            } else {
-              setIsPlaying(false);
-              return 0;
-            }
-          }
-          return nextTime;
-        });
-      }, intervalMs);
-    } else {
-      if (playTimerRef.current) {
-        clearInterval(playTimerRef.current);
-        playTimerRef.current = null;
-      }
-    }
-    return () => {
-      if (playTimerRef.current) clearInterval(playTimerRef.current);
-    };
-  }, [isPlaying, activeAudioSrc, playbackSpeed, repeatSentenceMode, activeSentence?.id, activeDuration, currentChapterIdx]);
+  // Function to transcribe a specific 20s slice on the fly
+  const transcribeSliceAtTime = async (sliceStartSec: number) => {
+    if (!activeAudioSrc) return;
+    if (transcribingSlices.has(sliceStartSec)) return;
 
-  // Play / Pause toggle controlling actual audio element
+    setTranscribingSlices((prev) => new Set(prev).add(sliceStartSec));
+
+    try {
+      const newSentences = await chunkTranscriber.transcribeSlice(activeAudioSrc, sliceStartSec, 20);
+      if (newSentences && newSentences.length > 0) {
+        setDynamicSentences((prev) => {
+          // Filter out placeholder chunks in this time window and replace with real transcription
+          const filtered = prev.filter(
+            (s) => !(s.start >= sliceStartSec - 0.5 && s.end <= sliceStartSec + 20.5 && s.text.includes('• ['))
+          );
+          const merged = [...filtered, ...newSentences].sort((a, b) => a.start - b.start);
+          return merged;
+        });
+      }
+    } catch (err) {
+      console.warn('Error transcribing slice', sliceStartSec, err);
+    } finally {
+      setTranscribingSlices((prev) => {
+        const next = new Set(prev);
+        next.delete(sliceStartSec);
+        return next;
+      });
+    }
+  };
+
+  // Proactive Lookahead Prefetching: Transcribes current chunk AND upcoming chunks ahead of time!
+  useEffect(() => {
+    if (autoTranscribeActive && activeAudioSrc) {
+      const currentSlice = Math.floor(currentTime / 20) * 20;
+      // Proactively prefetch current slice + next 2 slices in advance (up to 40-60s ahead!)
+      const slicesToPrefetch = [
+        currentSlice,
+        currentSlice + 20,
+        currentSlice + 40,
+      ].filter((s) => s < displayDuration);
+
+      slicesToPrefetch.forEach((sliceStart) => {
+        const isPlaceholder = dynamicSentences.some(
+          (s) =>
+            s.start >= sliceStart - 0.5 &&
+            s.end <= sliceStart + 20.5 &&
+            (s.text.includes('• [') || s.text.startsWith('Chapter audio:') || s.text.startsWith('Trecho'))
+        );
+
+        if (isPlaceholder && !chunkTranscriber.hasCachedChunk(activeAudioSrc, sliceStart, 20)) {
+          transcribeSliceAtTime(sliceStart);
+        }
+      });
+    }
+  }, [isPlaying, autoTranscribeActive, Math.floor(currentTime / 6), activeAudioSrc, displayDuration, dynamicSentences.length]);
+
+  // Transcribe whole chapter in the background sequentially
+  const handleTranscribeWholeChapterInBackground = async () => {
+    if (!activeAudioSrc || batchTranscribing) return;
+    setBatchTranscribing(true);
+    try {
+      const totalDur = displayDuration;
+      const slicesCount = Math.ceil(totalDur / 20);
+      for (let i = 0; i < slicesCount; i++) {
+        const start = i * 20;
+        await transcribeSliceAtTime(start);
+      }
+    } finally {
+      setBatchTranscribing(false);
+    }
+  };
+
+  // Play / Pause toggle
   const togglePlay = () => {
     if (!isPlaying) {
       if (audioRef.current && activeAudioSrc) {
-        if (currentTime >= activeDuration) {
+        if (currentTime >= displayDuration) {
           audioRef.current.currentTime = 0;
         }
         audioRef.current.play().catch((err) => console.warn('Audio play error:', err));
@@ -166,7 +222,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   };
 
   const seek = (time: number) => {
-    const clamped = Math.max(0, Math.min(time, activeDuration));
+    const clamped = Math.max(0, Math.min(time, displayDuration));
     setCurrentTime(clamped);
     if (audioRef.current && isFinite(clamped)) {
       audioRef.current.currentTime = clamped;
@@ -176,8 +232,8 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   const jumpSentence = (delta: number) => {
     let nextIdx = activeSentenceIndex + delta;
     if (nextIdx < 0) nextIdx = 0;
-    if (nextIdx >= activeSentences.length) nextIdx = activeSentences.length - 1;
-    const target = activeSentences[nextIdx];
+    if (nextIdx >= dynamicSentences.length) nextIdx = dynamicSentences.length - 1;
+    const target = dynamicSentences[nextIdx];
     if (target) {
       seek(target.start);
     }
@@ -187,6 +243,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     if (index >= 0 && audiobook.chapters && index < audiobook.chapters.length) {
       setCurrentChapterIdx(index);
       setCurrentTime(0);
+      setRealDuration(0);
       if (audioRef.current) {
         audioRef.current.currentTime = 0;
       }
@@ -229,6 +286,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   };
 
   const formatTime = (secs: number) => {
+    if (!isFinite(secs) || isNaN(secs) || secs < 0) return '0:00';
     const m = Math.floor(secs / 60);
     const s = Math.floor(secs % 60);
     return `${m}:${s < 10 ? '0' : ''}${s}`;
@@ -236,17 +294,26 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
 
   return (
     <div className="flex flex-col h-full bg-slate-950 text-slate-100 relative">
-      {/* Real Hardware HTML5 Audio Element for direct playback of MP3 / M4B */}
+      {/* Real HTML5 Audio Element with Duration Synchronization */}
       {activeAudioSrc && (
         <audio
           ref={audioRef}
           src={activeAudioSrc}
-          preload="auto"
+          preload="metadata"
+          onLoadedMetadata={() => {
+            if (audioRef.current && isFinite(audioRef.current.duration) && audioRef.current.duration > 0) {
+              setRealDuration(audioRef.current.duration);
+            }
+          }}
+          onDurationChange={() => {
+            if (audioRef.current && isFinite(audioRef.current.duration) && audioRef.current.duration > 0) {
+              setRealDuration(audioRef.current.duration);
+            }
+          }}
           onTimeUpdate={() => {
             if (audioRef.current) {
               const cur = audioRef.current.currentTime;
               setCurrentTime(cur);
-              // Handle sentence loop
               if (repeatSentenceMode && activeSentence && cur >= activeSentence.end) {
                 audioRef.current.currentTime = activeSentence.start;
               }
@@ -285,8 +352,46 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
           </div>
         </div>
 
-        {/* Audiobook & Side Tools Triggers (all open in side panel!) */}
+        {/* Audiobook & Side Tools Triggers */}
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Progressive JIT Auto-Transcribe Switch */}
+          {activeAudioSrc && (
+            <button
+              onClick={() => setAutoTranscribeActive(!autoTranscribeActive)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition ${
+                autoTranscribeActive
+                  ? 'bg-emerald-600/30 text-emerald-300 border-emerald-500/60'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-400 border-slate-700'
+              }`}
+              title="Transcrever automaticamente conforme a reprodução avança (trecho a trecho)"
+            >
+              <Radio className={`w-3.5 h-3.5 ${autoTranscribeActive ? 'animate-pulse text-emerald-400' : ''}`} />
+              <span>{autoTranscribeActive ? 'Transcrição Conforme Toca: On' : 'Transcrição ao Tocar: Off'}</span>
+            </button>
+          )}
+
+          {/* Background Batch Chapter Transcribe */}
+          {activeAudioSrc && (
+            <button
+              onClick={handleTranscribeWholeChapterInBackground}
+              disabled={batchTranscribing}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-indigo-950 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg border border-slate-700 transition"
+              title="Transcrever todos os blocos de 20s do capítulo em segundo plano"
+            >
+              {batchTranscribing ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
+                  <span>Transcrevendo...</span>
+                </>
+              ) : (
+                <>
+                  <Wand2 className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Transcrever Capítulo</span>
+                </>
+              )}
+            </button>
+          )}
+
           {audiobook.chapters && audiobook.chapters.length > 0 && (
             <button
               onClick={() => setSidePanelMode(sidePanelMode === 'chapters' ? null : 'chapters')}
@@ -304,7 +409,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
             </button>
           )}
 
-          {/* Voice Selector button (opens in sidebar!) */}
+          {/* Voice Selector button */}
           <button
             onClick={() => setSidePanelMode(sidePanelMode === 'voice' ? null : 'voice')}
             className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition ${
@@ -339,7 +444,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
             ))}
           </select>
 
-          {/* Upload Button (opens in sidebar!) */}
+          {/* Upload Button */}
           <button
             onClick={() => setSidePanelMode(sidePanelMode === 'upload' ? null : 'upload')}
             className={`text-xs px-3 py-1.5 rounded-lg border transition flex items-center gap-1.5 font-medium ${
@@ -397,27 +502,31 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
         {/* Main Reading & Transcript Area */}
         <div
           ref={containerRef}
-          className="flex-1 overflow-y-auto px-6 py-8 space-y-6 max-w-4xl mx-auto w-full custom-scrollbar"
+          className="flex-1 overflow-y-auto px-6 pt-6 pb-32 space-y-6 max-w-4xl mx-auto w-full custom-scrollbar"
         >
           {/* Prompt Banner */}
           <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800/80 text-xs text-slate-400 flex items-start justify-between gap-4">
             <div className="flex items-start gap-2">
               <HelpCircle className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
               <div>
-                <span className="font-semibold text-slate-300">Barra Lateral Integrada: </span>
-                Todas as ferramentas (Dicionário, Gramática, Capítulos, Vozes e Upload) abrem na barra lateral à direita, <strong className="text-emerald-400">sem tampar o texto do audiolivro</strong>.
+                <span className="font-semibold text-slate-300">Transcrição Ágil em Chunks: </span>
+                O áudio toca imediatamente com duração real ({formatTime(displayDuration)}).
+                Conforme você ouve, cada trecho de 20s é fatiado e transcrito automaticamente em segundo plano.
               </div>
             </div>
           </div>
 
-          {/* Sentences List */}
+          {/* Sentences / Timeframes List */}
           <div className="space-y-6">
-            {activeSentences.map((sentence, sIdx) => {
+            {dynamicSentences.map((sentence, sIdx) => {
               const isCurrentSentence = activeSentenceIndex === sIdx;
+              const sliceStart = Math.floor(sentence.start / 20) * 20;
+              const isChunkTranscribing = transcribingSlices.has(sliceStart);
+              const isPlaceholder = sentence.text.includes('• [') || sentence.text.startsWith('Trecho');
 
               return (
                 <div
-                  key={sentence.id}
+                  key={sentence.id || sIdx}
                   className={`group relative p-4 rounded-2xl transition-all duration-300 border ${
                     isCurrentSentence
                       ? 'bg-slate-900/90 border-indigo-500/50 shadow-xl shadow-indigo-950/20'
@@ -434,7 +543,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                             ? 'bg-indigo-600 text-white font-semibold'
                             : 'bg-slate-800 text-slate-400 hover:text-white'
                         }`}
-                        title="Pular áudio para esta frase"
+                        title="Pular áudio para este trecho"
                       >
                         {formatTime(sentence.start)}
                       </button>
@@ -447,6 +556,28 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                     </div>
 
                     <div className="flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition">
+                      {/* One-click manual chunk transcribe button if placeholder */}
+                      {isPlaceholder && (
+                        <button
+                          onClick={() => transcribeSliceAtTime(sliceStart)}
+                          disabled={isChunkTranscribing}
+                          className="flex items-center gap-1 px-2 py-0.5 text-[11px] text-emerald-300 bg-emerald-950/40 hover:bg-emerald-950 border border-emerald-800/60 rounded transition"
+                          title="Transcrever este trecho específico de 20s"
+                        >
+                          {isChunkTranscribing ? (
+                            <>
+                              <Loader2 className="w-3 h-3 animate-spin text-emerald-400" />
+                              <span>Processando...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Wand2 className="w-3 h-3 text-emerald-400" />
+                              <span>Transcrever Trecho (20s)</span>
+                            </>
+                          )}
+                        </button>
+                      )}
+
                       <button
                         onClick={() => audioEngine.speakText(sentence.text)}
                         className="p-1.5 text-slate-400 hover:text-indigo-300 hover:bg-slate-800 rounded transition"
@@ -503,33 +634,44 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                       blurEnglish ? 'blur-sm select-none hover:blur-none transition-all' : ''
                     }`}
                   >
-                    {sentence.words.map((cue, wIdx) => {
-                      const isWordActive =
-                        currentTime >= cue.start && currentTime <= cue.end;
-                      const isWordSelected = selectedWord === cue.cleanWord;
+                    {isChunkTranscribing ? (
+                      <span className="flex items-center gap-2 text-indigo-300 text-sm font-sans animate-pulse">
+                        <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
+                        <span>Fatiando e transcrevendo áudio deste trecho (20s)...</span>
+                      </span>
+                    ) : sentence.words && sentence.words.length > 0 && !isPlaceholder ? (
+                      sentence.words.map((cue, wIdx) => {
+                        const isWordActive =
+                          currentTime >= cue.start && currentTime <= cue.end;
+                        const isWordSelected = selectedWord === cue.cleanWord;
 
-                      return (
-                        <span
-                          key={wIdx}
-                          ref={isWordActive ? activeWordRef : null}
-                          onClick={() => handleWordClick(cue, sentence)}
-                          className={`inline-block px-1 py-0.5 rounded cursor-pointer transition-all duration-150 mr-1 select-text ${
-                            isWordActive
-                              ? 'bg-indigo-500 text-white font-semibold scale-105 shadow-md shadow-indigo-500/40 ring-2 ring-indigo-400/50'
-                              : isWordSelected
-                              ? 'bg-emerald-500/30 text-emerald-200 border-b-2 border-emerald-400'
-                              : 'hover:bg-indigo-950/60 hover:text-indigo-200 text-slate-200'
-                          }`}
-                          title="Clique para abrir detalhes na barra lateral sem tampar o texto"
-                        >
-                          {cue.word}
-                        </span>
-                      );
-                    })}
+                        return (
+                          <span
+                            key={wIdx}
+                            ref={isWordActive ? activeWordRef : null}
+                            onClick={() => handleWordClick(cue, sentence)}
+                            className={`inline-block px-1 py-0.5 rounded cursor-pointer transition-all duration-150 mr-1 select-text ${
+                              isWordActive
+                                ? 'bg-indigo-500 text-white font-semibold scale-105 shadow-md shadow-indigo-500/40 ring-2 ring-indigo-400/50'
+                                : isWordSelected
+                                ? 'bg-emerald-500/30 text-emerald-200 border-b-2 border-emerald-400'
+                                : 'hover:bg-indigo-950/60 hover:text-indigo-200 text-slate-200'
+                            }`}
+                            title="Clique para abrir detalhes na barra lateral sem tampar o texto"
+                          >
+                            {cue.word}
+                          </span>
+                        );
+                      })
+                    ) : (
+                      <span className="text-slate-400 font-sans text-sm italic flex items-center justify-between">
+                        <span>{sentence.text}</span>
+                      </span>
+                    )}
                   </p>
 
                   {/* Subtitle / Portuguese Translation */}
-                  {showPortuguese && (
+                  {showPortuguese && sentence.translationPt && !isPlaceholder && (
                     <p className="mt-2 text-sm text-slate-400 italic font-sans leading-relaxed border-t border-slate-800/50 pt-1.5 flex items-start gap-1.5">
                       <span className="text-[10px] uppercase font-bold text-slate-500 not-italic tracking-wider mt-0.5">
                         PT:
@@ -563,46 +705,46 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
         )}
       </div>
 
-      {/* Floating Bottom Control Bar */}
-      <div className="border-t border-slate-800 bg-slate-900/95 backdrop-blur-md px-6 py-4 space-y-3 sticky bottom-0 z-20 shadow-2xl">
+      {/* Persistent Bottom Control Bar with ACCURATE Scrubber */}
+      <div className="shrink-0 border-t border-slate-800/90 bg-slate-900/98 backdrop-blur-xl px-4 sm:px-6 py-3.5 space-y-2.5 sticky bottom-0 z-30 shadow-[0_-10px_35px_rgba(0,0,0,0.8)]">
         {/* Scrubber Progress Bar */}
         <div className="flex items-center gap-3">
-          <span className="text-xs font-mono text-slate-400 w-10 text-right">
+          <span className="text-xs font-mono text-slate-400 w-12 text-right">
             {formatTime(currentTime)}
           </span>
 
           <div
-            className="flex-1 h-2 bg-slate-800 hover:h-2.5 rounded-full relative cursor-pointer group transition-all"
+            className="flex-1 h-2.5 bg-slate-800 hover:h-3 rounded-full relative cursor-pointer group transition-all"
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
-              const pos = (e.clientX - rect.left) / rect.width;
-              seek(pos * activeDuration);
+              const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+              seek(pos * displayDuration);
             }}
           >
             {/* Progress Filled */}
             <div
               className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full relative"
               style={{
-                width: `${(currentTime / (activeDuration || 1)) * 100}%`,
+                width: `${Math.min(100, (currentTime / (displayDuration || 1)) * 100)}%`,
               }}
             >
               <div className="w-3.5 h-3.5 bg-white rounded-full absolute right-0 top-1/2 -translate-y-1/2 shadow opacity-0 group-hover:opacity-100 transition-opacity" />
             </div>
 
-            {/* Sentence Markers */}
-            {activeSentences.map((s, idx) => (
+            {/* Sentence / Chunk Markers */}
+            {dynamicSentences.map((s, idx) => (
               <div
                 key={idx}
-                className="absolute top-0 bottom-0 w-0.5 bg-slate-700/60 pointer-events-none"
+                className="absolute top-0 bottom-0 w-0.5 bg-slate-700/40 pointer-events-none"
                 style={{
-                  left: `${(s.start / (activeDuration || 1)) * 100}%`,
+                  left: `${(s.start / (displayDuration || 1)) * 100}%`,
                 }}
               />
             ))}
           </div>
 
-          <span className="text-xs font-mono text-slate-400 w-10">
-            {formatTime(activeDuration)}
+          <span className="text-xs font-mono text-slate-400 w-12">
+            {formatTime(displayDuration)}
           </span>
         </div>
 

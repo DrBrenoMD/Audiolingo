@@ -117,7 +117,7 @@ export default function App() {
   const dueCardsCount = cards.filter((c) => c.dueDate <= Date.now()).length;
 
   return (
-    <div className="min-h-screen bg-slate-950 flex flex-col font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
+    <div className="h-screen overflow-hidden bg-slate-950 flex flex-col font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
       {/* Top Navigation */}
       <Navbar
         activeTab={activeTab}

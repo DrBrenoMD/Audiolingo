@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { WordLookupResult, SRSFlashcard, Audiobook, Chapter, Sentence, GrammarExplanationResult } from '../types';
 import { audioEngine, BrowserVoice } from '../utils/audioEngine';
+import { liveTranscriber } from '../utils/liveTranscription';
 import confetti from 'canvas-confetti';
 
 export type SidePanelMode = 'word' | 'grammar' | 'chapters' | 'voice' | 'upload';
@@ -371,56 +372,27 @@ export const SidePanel: React.FC<SidePanelProps> = ({
         const item = queuedFiles[i];
         setUploadProgress(`Transcrevendo e alinhando faixa ${i + 1}/${total}: "${item.cleanTitle}"...`);
 
-        // Convert audio to base64 using FileReader
-        const base64Audio = await new Promise<string>((resolve) => {
-          const reader = new FileReader();
-          reader.readAsDataURL(item.file);
-          reader.onload = () => {
-            const res = (reader.result as string).split(',')[1] || '';
-            resolve(res);
+        // Probe real hardware duration of the audio file in the browser (100% exact, no AI needed)
+        const realDuration = await new Promise<number>((resolve) => {
+          const probe = new Audio(item.blobUrl);
+          probe.onloadedmetadata = () => {
+            const dur = probe.duration;
+            resolve(isFinite(dur) && dur > 0 ? Math.round(dur) : 180);
           };
-          reader.onerror = () => resolve('');
+          probe.onerror = () => resolve(180);
         });
 
         let chapterSentences: Sentence[] = [];
-        let summaryPt = '';
-        let estDuration = 45;
+        let summaryPt = `Capítulo ${i + 1} importado com sucesso.`;
 
-        try {
-          const res = await fetch('/api/transcribe-audio', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              audioBase64: base64Audio || undefined,
-              mimeType: item.file.type || 'audio/mp3',
-              title: item.cleanTitle,
-              providedText: i === 0 && referenceText ? referenceText : undefined,
-            }),
-          });
+        // If user provided reference text, subtitle, or script, parse and align INSTANTLY without AI
+        if (referenceText && i === 0) {
+          chapterSentences = liveTranscriber.parseTextToTimedSentences(referenceText, realDuration);
+        }
 
-          if (res.ok) {
-            const data = await res.json();
-            chapterSentences = data.sentences || [];
-            summaryPt = data.summaryPt || '';
-            estDuration = data.totalDurationEstimate || (chapterSentences[chapterSentences.length - 1]?.end ?? 60);
-          }
-        } catch (apiErr) {
-          console.warn('API align fallback:', apiErr);
-          chapterSentences = [
-            {
-              id: `s-${i}-1`,
-              index: 0,
-              start: 0,
-              end: 15,
-              text: `Chapter audio: ${item.cleanTitle}`,
-              translationPt: `Áudio do capítulo: ${item.cleanTitle}`,
-              words: [
-                { word: 'Chapter', cleanWord: 'chapter', start: 0, end: 3, index: 0 },
-                { word: 'audio:', cleanWord: 'audio', start: 3.2, end: 6, index: 1 },
-                { word: item.cleanTitle, cleanWord: item.cleanTitle.toLowerCase(), start: 6.2, end: 12, index: 2 },
-              ],
-            },
-          ];
+        // If no reference text, create agile progressive timeframes across the REAL duration
+        if (chapterSentences.length === 0) {
+          chapterSentences = liveTranscriber.generateInitialTimeframes(realDuration, item.cleanTitle);
         }
 
         generatedChapters.push({
@@ -429,7 +401,7 @@ export const SidePanel: React.FC<SidePanelProps> = ({
           title: item.cleanTitle,
           fileName: item.name,
           audioUrl: item.blobUrl,
-          duration: estDuration,
+          duration: realDuration,
           summaryPt,
           sentences: chapterSentences,
           status: 'ready',
@@ -980,6 +952,20 @@ export const SidePanel: React.FC<SidePanelProps> = ({
                     onChange={(e) => setNewBookTitle(e.target.value)}
                     placeholder="Nome da Obra"
                     className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white"
+                  />
+                </div>
+
+                <div className="space-y-1.5 pt-1">
+                  <label className="text-xs text-slate-300 font-semibold flex items-center justify-between">
+                    <span>Texto do Livro ou Legenda SRT (Opcional)</span>
+                    <span className="text-[10px] text-emerald-400 font-normal">Alinhamento 0ms sem IA</span>
+                  </label>
+                  <textarea
+                    value={referenceText}
+                    onChange={(e) => setReferenceText(e.target.value)}
+                    placeholder="Cole aqui o texto em inglês ou legenda .SRT para alinhamento instantâneo sem IA..."
+                    rows={3}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
                   />
                 </div>
 

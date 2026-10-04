@@ -149,6 +149,79 @@ Ensure all timestamps are realistic, sequential, and cover every word accurately
   }
 });
 
+// Fast Just-In-Time (JIT) chunk transcription as playback advances
+app.post('/api/transcribe-chunk', async (req, res) => {
+  try {
+    const { audioChunkBase64, mimeType = 'audio/wav', startOffset = 0, duration = 20 } = req.body;
+
+    if (!audioChunkBase64) {
+      return res.status(400).json({ error: 'audioChunkBase64 required' });
+    }
+
+    // High-speed plain text speech transcription without JSON generation delay
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: [
+        {
+          inlineData: {
+            mimeType,
+            data: audioChunkBase64,
+          },
+        },
+        { text: 'Transcribe the spoken English in this audio clip. Output ONLY the plain spoken words, with proper capitalization and punctuation. If silence or music, reply empty.' },
+      ],
+    });
+
+    const rawTranscript = (response.text || '').trim().replace(/^["']|["']$/g, '');
+
+    if (!rawTranscript || rawTranscript.toLowerCase().includes('silence') || rawTranscript.length < 2) {
+      return res.json({ sentences: [] });
+    }
+
+    // Fast translation using in-memory cache
+    let ptTranslation = '';
+    if (translationCache.has(rawTranscript)) {
+      ptTranslation = translationCache.get(rawTranscript)!;
+    } else {
+      try {
+        const trRes = await fetch(
+          `https://api.mymemory.translated.net/get?q=${encodeURIComponent(rawTranscript.slice(0, 300))}&langpair=en|pt-BR`
+        );
+        if (trRes.ok) {
+          const trData = await trRes.json();
+          ptTranslation = trData?.responseData?.translatedText || '';
+          if (ptTranslation) translationCache.set(rawTranscript, ptTranslation);
+        }
+      } catch {}
+    }
+
+    // Split into words with sequential timestamps
+    const rawWords = rawTranscript.split(/\s+/).filter(Boolean);
+    const wordDur = duration / Math.max(1, rawWords.length);
+
+    const sentence = {
+      id: `s-${Math.round(startOffset)}`,
+      index: 0,
+      start: +Number(startOffset).toFixed(2),
+      end: +Number(startOffset + duration).toFixed(2),
+      text: rawTranscript,
+      translationPt: ptTranslation || 'Tradução do áudio',
+      words: rawWords.map((w, wi) => ({
+        word: w,
+        cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+        start: +(Number(startOffset) + wi * wordDur).toFixed(2),
+        end: +(Number(startOffset) + (wi + 1) * wordDur).toFixed(2),
+        index: wi,
+      })),
+    };
+
+    return res.json({ sentences: [sentence] });
+  } catch (err: any) {
+    console.error('Chunk transcribe error:', err);
+    return res.status(500).json({ error: err.message || 'Chunk failed' });
+  }
+});
+
 // In-memory cache for instantaneous repeated lookups
 const dictionaryCache = new Map<string, any>();
 const translationCache = new Map<string, string>();
