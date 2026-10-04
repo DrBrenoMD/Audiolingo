@@ -4,14 +4,11 @@ import { Audiobook, SRSFlashcard, UserStats } from './types';
 import { getInitialFlashcards, saveFlashcardsToStorage } from './utils/srs';
 import { Navbar, NavTab } from './components/Navbar';
 import { AudiobookPlayer } from './components/AudiobookPlayer';
-import { WordInspectorModal } from './components/WordInspectorModal';
-import { GrammarExplainerModal } from './components/GrammarExplainerModal';
 import { SpeakingLab } from './components/SpeakingLab';
 import { ListeningLab } from './components/ListeningLab';
 import { WritingLab } from './components/WritingLab';
 import { SRSFlashcards } from './components/SRSFlashcards';
 import { ProgressDashboard } from './components/ProgressDashboard';
-import { UploadModal } from './components/UploadModal';
 
 const STATS_KEY = 'echolingo_stats_data';
 const BOOKS_KEY = 'echolingo_custom_books';
@@ -33,12 +30,6 @@ export default function App() {
 
   const [selectedAudiobook, setSelectedAudiobook] = useState<Audiobook>(audiobooks[0]);
   const [cards, setCards] = useState<SRSFlashcard[]>(() => getInitialFlashcards());
-
-  // Modals state
-  const [inspectWord, setInspectWord] = useState<string | null>(null);
-  const [inspectSentence, setInspectSentence] = useState<string>('');
-  const [grammarSentence, setGrammarSentence] = useState<string | null>(null);
-  const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [speakingSentence, setSpeakingSentence] = useState<string>('');
 
   // User Stats
@@ -72,11 +63,11 @@ export default function App() {
     localStorage.setItem(STATS_KEY, JSON.stringify(stats));
   }, [stats]);
 
-  // Handle saving word or sentence to SRS deck
+  // Handle saving to SRS deck (always preserves full sentence for sentence mining!)
   const handleSaveToSRS = (newCardData: Partial<SRSFlashcard>) => {
     const newCard: SRSFlashcard = {
       id: `card-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-      type: newCardData.type || 'word',
+      type: 'sentence', // Full sentence mining
       frontText: newCardData.frontText || '',
       contextSentence: newCardData.contextSentence,
       backTranslation: newCardData.backTranslation || '',
@@ -84,7 +75,7 @@ export default function App() {
       notes: newCardData.notes,
       audiobookTitle: newCardData.audiobookTitle || selectedAudiobook.title,
       dateAdded: Date.now(),
-      dueDate: Date.now(), // available for review
+      dueDate: Date.now(),
       interval: 1,
       repetitions: 0,
       easeFactor: 2.5,
@@ -110,7 +101,6 @@ export default function App() {
   const handleAudiobookCreated = (newBook: Audiobook) => {
     setAudiobooks((prev) => {
       const updated = [newBook, ...prev];
-      // Save custom books
       const customOnly = updated.filter((b) => b.id.startsWith('custom-'));
       localStorage.setItem(BOOKS_KEY, JSON.stringify(customOnly));
       return updated;
@@ -134,20 +124,21 @@ export default function App() {
         onTabChange={setActiveTab}
         dueCardsCount={dueCardsCount}
         streak={stats.currentStreak}
-        onOpenUpload={() => setIsUploadOpen(true)}
+        onOpenUpload={() => {
+          setActiveTab('player');
+        }}
       />
 
       {/* Main View Area */}
-      <main className="flex-1 flex flex-col">
+      <main className="flex-1 flex flex-col overflow-hidden">
         {activeTab === 'player' && (
           <AudiobookPlayer
             audiobook={selectedAudiobook}
-            onExplainGrammar={(sentence) => setGrammarSentence(sentence)}
             onSaveToSRS={handleSaveToSRS}
             onNavigateToSpeaking={handleNavigateToSpeaking}
             onSelectAudiobook={(b) => setSelectedAudiobook(b)}
             allAudiobooks={audiobooks}
-            onOpenUpload={() => setIsUploadOpen(true)}
+            onAudiobookCreated={handleAudiobookCreated}
           />
         )}
 
@@ -196,24 +187,6 @@ export default function App() {
           />
         )}
       </main>
-
-      {/* Sentence Grammar Modal */}
-      {grammarSentence && (
-        <GrammarExplainerModal
-          sentence={grammarSentence}
-          bookTitle={selectedAudiobook.title}
-          isOpen={Boolean(grammarSentence)}
-          onClose={() => setGrammarSentence(null)}
-          onSaveToSRS={handleSaveToSRS}
-        />
-      )}
-
-      {/* Upload Custom Audiobook Modal */}
-      <UploadModal
-        isOpen={isUploadOpen}
-        onClose={() => setIsUploadOpen(false)}
-        onAudiobookCreated={handleAudiobookCreated}
-      />
     </div>
   );
 }

@@ -20,33 +20,29 @@ import {
   ChevronRight,
   ChevronLeft,
   FolderOpen,
-  X,
   Sliders,
 } from 'lucide-react';
 import { Audiobook, Sentence, WordCue, SRSFlashcard, Chapter } from '../types';
 import { audioEngine } from '../utils/audioEngine';
-import { WordInspectorSidebar } from './WordInspectorSidebar';
-import { VoiceSelectorModal } from './VoiceSelectorModal';
+import { SidePanel, SidePanelMode } from './SidePanel';
 import confetti from 'canvas-confetti';
 
 interface AudiobookPlayerProps {
   audiobook: Audiobook;
-  onExplainGrammar: (sentence: string) => void;
   onSaveToSRS: (card: Partial<SRSFlashcard>) => void;
   onNavigateToSpeaking: (sentenceText: string) => void;
   onSelectAudiobook: (book: Audiobook) => void;
   allAudiobooks: Audiobook[];
-  onOpenUpload: () => void;
+  onAudiobookCreated: (newBook: Audiobook) => void;
 }
 
 export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   audiobook,
-  onExplainGrammar,
   onSaveToSRS,
   onNavigateToSpeaking,
   onSelectAudiobook,
   allAudiobooks,
-  onOpenUpload,
+  onAudiobookCreated,
 }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -60,16 +56,17 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   const [currentChapterIdx, setCurrentChapterIdx] = useState<number>(
     audiobook.currentChapterIndex || 0
   );
-  const [isChapterDrawerOpen, setIsChapterDrawerOpen] = useState(false);
-  const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
 
-  // Side-docked inspector state (does not cover text!)
+  // UNIFIED SIDE PANEL STATE (Never covers text!)
+  const [sidePanelMode, setSidePanelMode] = useState<SidePanelMode | null>(null);
   const [selectedWord, setSelectedWord] = useState<string | null>(null);
   const [selectedSentenceText, setSelectedSentenceText] = useState<string>('');
   const [selectedSentencePt, setSelectedSentencePt] = useState<string>('');
+  const [grammarSentence, setGrammarSentence] = useState<string | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const activeWordRef = useRef<HTMLSpanElement>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const playTimerRef = useRef<number | null>(null);
 
   // Reset when audiobook changes
@@ -77,12 +74,23 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     setCurrentChapterIdx(audiobook.currentChapterIndex || 0);
     setCurrentTime(0);
     setIsPlaying(false);
-    setSelectedWord(null);
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
   }, [audiobook.id]);
 
   const currentChapter: Chapter | undefined = audiobook.chapters?.[currentChapterIdx];
   const activeSentences: Sentence[] = currentChapter?.sentences || audiobook.sentences || [];
   const activeDuration: number = currentChapter?.duration || audiobook.duration || 60;
+  const activeAudioSrc: string = currentChapter?.audioUrl || audiobook.audioUrl || '';
+
+  // Synchronize playback speed with audio element
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.playbackRate = playbackSpeed;
+    }
+  }, [playbackSpeed]);
 
   // Active sentence & word
   const activeSentenceIndex = activeSentences.findIndex(
@@ -106,23 +114,19 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     }
   }, [activeWordCue?.word, isPlaying]);
 
-  // Audio timer simulation / playback sync
+  // Audio timer fallback when no hardware audio is playing
   useEffect(() => {
-    if (isPlaying) {
+    if (isPlaying && !activeAudioSrc) {
       const intervalMs = 50;
       playTimerRef.current = window.setInterval(() => {
         setCurrentTime((prev) => {
           const nextTime = prev + (intervalMs / 1000) * playbackSpeed;
-
-          if (repeatSentenceMode && activeSentence) {
-            if (nextTime >= activeSentence.end) {
-              return activeSentence.start;
-            }
+          if (repeatSentenceMode && activeSentence && nextTime >= activeSentence.end) {
+            return activeSentence.start;
           }
-
           if (nextTime >= activeDuration) {
             if (audiobook.chapters && currentChapterIdx < audiobook.chapters.length - 1) {
-              setCurrentChapterIdx((prevIdx) => prevIdx + 1);
+              switchChapter(currentChapterIdx + 1);
               return 0;
             } else {
               setIsPlaying(false);
@@ -138,29 +142,25 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
         playTimerRef.current = null;
       }
     }
-
     return () => {
-      if (playTimerRef.current) {
-        clearInterval(playTimerRef.current);
-      }
+      if (playTimerRef.current) clearInterval(playTimerRef.current);
     };
-  }, [
-    isPlaying,
-    playbackSpeed,
-    repeatSentenceMode,
-    activeSentence?.id,
-    activeDuration,
-    currentChapterIdx,
-    audiobook.chapters,
-  ]);
+  }, [isPlaying, activeAudioSrc, playbackSpeed, repeatSentenceMode, activeSentence?.id, activeDuration, currentChapterIdx]);
 
+  // Play / Pause toggle controlling actual audio element
   const togglePlay = () => {
     if (!isPlaying) {
-      if (currentTime >= activeDuration) {
-        setCurrentTime(0);
+      if (audioRef.current && activeAudioSrc) {
+        if (currentTime >= activeDuration) {
+          audioRef.current.currentTime = 0;
+        }
+        audioRef.current.play().catch((err) => console.warn('Audio play error:', err));
       }
       setIsPlaying(true);
     } else {
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
       setIsPlaying(false);
     }
   };
@@ -168,6 +168,9 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   const seek = (time: number) => {
     const clamped = Math.max(0, Math.min(time, activeDuration));
     setCurrentTime(clamped);
+    if (audioRef.current && isFinite(clamped)) {
+      audioRef.current.currentTime = clamped;
+    }
   };
 
   const jumpSentence = (delta: number) => {
@@ -176,7 +179,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     if (nextIdx >= activeSentences.length) nextIdx = activeSentences.length - 1;
     const target = activeSentences[nextIdx];
     if (target) {
-      setCurrentTime(target.start);
+      seek(target.start);
     }
   };
 
@@ -184,15 +187,24 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     if (index >= 0 && audiobook.chapters && index < audiobook.chapters.length) {
       setCurrentChapterIdx(index);
       setCurrentTime(0);
-      setIsChapterDrawerOpen(false);
+      if (audioRef.current) {
+        audioRef.current.currentTime = 0;
+      }
     }
   };
 
-  // Click on word opens SIDE PANEL without covering the text!
+  // Click on word opens SIDE PANEL without covering text!
   const handleWordClick = (wordCue: WordCue, sentence: Sentence) => {
     setSelectedWord(wordCue.cleanWord);
     setSelectedSentenceText(sentence.text);
     setSelectedSentencePt(sentence.translationPt);
+    setSidePanelMode('word');
+  };
+
+  // Click on grammar opens SIDE PANEL without covering text!
+  const handleGrammarClick = (sentenceText: string) => {
+    setGrammarSentence(sentenceText);
+    setSidePanelMode('grammar');
   };
 
   // Add full sentence to SRS
@@ -224,7 +236,35 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
 
   return (
     <div className="flex flex-col h-full bg-slate-950 text-slate-100 relative">
-      {/* Top Header & Book Switcher Bar */}
+      {/* Real Hardware HTML5 Audio Element for direct playback of MP3 / M4B */}
+      {activeAudioSrc && (
+        <audio
+          ref={audioRef}
+          src={activeAudioSrc}
+          preload="auto"
+          onTimeUpdate={() => {
+            if (audioRef.current) {
+              const cur = audioRef.current.currentTime;
+              setCurrentTime(cur);
+              // Handle sentence loop
+              if (repeatSentenceMode && activeSentence && cur >= activeSentence.end) {
+                audioRef.current.currentTime = activeSentence.start;
+              }
+            }
+          }}
+          onEnded={() => {
+            if (audiobook.chapters && currentChapterIdx < audiobook.chapters.length - 1) {
+              switchChapter(currentChapterIdx + 1);
+            } else {
+              setIsPlaying(false);
+            }
+          }}
+          onPlay={() => setIsPlaying(true)}
+          onPause={() => setIsPlaying(false)}
+        />
+      )}
+
+      {/* Top Header & Navigation Bar */}
       <div className="px-6 py-4 border-b border-slate-800/80 bg-slate-900/60 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           <img
@@ -245,31 +285,41 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
           </div>
         </div>
 
-        {/* Audiobook & Chapter Navigation Dropdowns */}
+        {/* Audiobook & Side Tools Triggers (all open in side panel!) */}
         <div className="flex items-center gap-2 flex-wrap">
           {audiobook.chapters && audiobook.chapters.length > 0 && (
             <button
-              onClick={() => setIsChapterDrawerOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-indigo-300 border border-slate-700 rounded-lg transition"
+              onClick={() => setSidePanelMode(sidePanelMode === 'chapters' ? null : 'chapters')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition ${
+                sidePanelMode === 'chapters'
+                  ? 'bg-purple-600/30 text-purple-300 border-purple-500'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+              }`}
+              title="Abrir índice de capítulos na barra lateral"
             >
-              <ListOrdered className="w-3.5 h-3.5 text-indigo-400" />
+              <ListOrdered className="w-3.5 h-3.5 text-purple-400" />
               <span>
                 Capítulo {currentChapterIdx + 1}/{audiobook.chapters.length}
               </span>
             </button>
           )}
 
-          {/* Voice Selector button */}
+          {/* Voice Selector button (opens in sidebar!) */}
           <button
-            onClick={() => setIsVoiceModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-emerald-300 border border-slate-700 rounded-lg transition"
-            title="Escolher voz do navegador (Natural / English)"
+            onClick={() => setSidePanelMode(sidePanelMode === 'voice' ? null : 'voice')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition ${
+              sidePanelMode === 'voice'
+                ? 'bg-teal-600/30 text-teal-300 border-teal-500'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+            }`}
+            title="Abrir seletor de voz na barra lateral"
           >
-            <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+            <Volume2 className="w-3.5 h-3.5 text-teal-400" />
             <span className="hidden sm:inline">Voz do Navegador</span>
             <span className="sm:hidden">Voz</span>
           </button>
 
+          {/* Book Dropdown */}
           <select
             value={audiobook.id}
             onChange={(e) => {
@@ -289,9 +339,15 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
             ))}
           </select>
 
+          {/* Upload Button (opens in sidebar!) */}
           <button
-            onClick={onOpenUpload}
-            className="text-xs px-3 py-1.5 bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/30 rounded-lg transition flex items-center gap-1.5 font-medium"
+            onClick={() => setSidePanelMode(sidePanelMode === 'upload' ? null : 'upload')}
+            className={`text-xs px-3 py-1.5 rounded-lg border transition flex items-center gap-1.5 font-medium ${
+              sidePanelMode === 'upload'
+                ? 'bg-indigo-600 text-white border-indigo-500'
+                : 'bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border-indigo-500/30'
+            }`}
+            title="Importar novos áudios ou pastas na barra lateral"
           >
             <FolderOpen className="w-3.5 h-3.5" />
             <span>Upload Pasta/MP3</span>
@@ -303,16 +359,12 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
       {audiobook.chapters && audiobook.chapters.length > 1 && (
         <div className="px-6 py-2 bg-indigo-950/30 border-b border-indigo-900/30 flex items-center justify-between text-xs text-slate-300">
           <div className="flex items-center gap-2">
-            <span className="font-semibold text-indigo-400">
-              Faixa Atual:
-            </span>
+            <span className="font-semibold text-indigo-400">Faixa Atual:</span>
             <span className="text-white font-medium">
               {currentChapter?.title || `Capítulo ${currentChapterIdx + 1}`}
             </span>
             {currentChapter?.fileName && (
-              <span className="text-[11px] text-slate-500 font-mono">
-                ({currentChapter.fileName})
-              </span>
+              <span className="text-[11px] text-slate-500 font-mono">({currentChapter.fileName})</span>
             )}
           </div>
 
@@ -340,7 +392,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
         </div>
       )}
 
-      {/* Side-by-Side Area: Text on Left, Sidebar Inspector on Right without covering text! */}
+      {/* Side-by-Side Area: Text on Left (NEVER COVERED), Side Panel on Right */}
       <div className="flex-1 flex overflow-hidden">
         {/* Main Reading & Transcript Area */}
         <div
@@ -352,8 +404,8 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
             <div className="flex items-start gap-2">
               <HelpCircle className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
               <div>
-                <span className="font-semibold text-slate-300">Tradução Lateral: </span>
-                Ao clicar em qualquer palavra, as traduções, fonética e significados abrem <strong className="text-emerald-400">no painel lateral ao lado</strong>, sem tampar o texto do audiolivro!
+                <span className="font-semibold text-slate-300">Barra Lateral Integrada: </span>
+                Todas as ferramentas (Dicionário, Gramática, Capítulos, Vozes e Upload) abrem na barra lateral à direita, <strong className="text-emerald-400">sem tampar o texto do audiolivro</strong>.
               </div>
             </div>
           </div>
@@ -404,9 +456,9 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                       </button>
 
                       <button
-                        onClick={() => onExplainGrammar(sentence.text)}
+                        onClick={() => handleGrammarClick(sentence.text)}
                         className="flex items-center gap-1 px-2 py-1 text-[11px] text-slate-300 hover:text-white bg-slate-800/80 hover:bg-slate-700/80 rounded transition"
-                        title="Analisar gramática e tempos verbais"
+                        title="Abrir análise gramatical na barra lateral"
                       >
                         <Sparkles className="w-3 h-3 text-indigo-400" />
                         <span>Gramática</span>
@@ -415,7 +467,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                       <button
                         onClick={() => onNavigateToSpeaking(sentence.text)}
                         className="flex items-center gap-1 px-2 py-1 text-[11px] text-slate-300 hover:text-white bg-slate-800/80 hover:bg-slate-700/80 rounded transition"
-                        title="Praticar pronúncia desta frase no Speaking Lab"
+                        title="Praticar pronúncia no Speaking Lab"
                       >
                         <Mic className="w-3 h-3 text-emerald-400" />
                         <span>Speaking</span>
@@ -468,7 +520,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                               ? 'bg-emerald-500/30 text-emerald-200 border-b-2 border-emerald-400'
                               : 'hover:bg-indigo-950/60 hover:text-indigo-200 text-slate-200'
                           }`}
-                          title="Clique para abrir detalhes no painel lateral ao lado"
+                          title="Clique para abrir detalhes na barra lateral sem tampar o texto"
                         >
                           {cue.word}
                         </span>
@@ -491,21 +543,22 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
           </div>
         </div>
 
-        {/* Side-Docked Word Inspector (Opened side-by-side, NOT covering the text!) */}
-        {selectedWord && (
-          <WordInspectorSidebar
+        {/* DOCKED SIDE PANEL (NEVER COVERS THE TEXT!) */}
+        {sidePanelMode && (
+          <SidePanel
+            mode={sidePanelMode}
+            onClose={() => setSidePanelMode(null)}
+            audiobook={audiobook}
+            currentChapterIdx={currentChapterIdx}
+            onSelectChapter={(idx) => switchChapter(idx)}
             word={selectedWord}
             contextSentence={selectedSentenceText}
             sentenceTranslationPt={selectedSentencePt}
-            bookTitle={audiobook.title}
-            isOpen={Boolean(selectedWord)}
-            onClose={() => setSelectedWord(null)}
+            onInspectNewWord={(w) => setSelectedWord(w)}
+            onPracticeSpeakingWord={(w) => onNavigateToSpeaking(w)}
+            grammarSentence={grammarSentence}
             onSaveToSRS={onSaveToSRS}
-            onInspectNewWord={(newWord) => setSelectedWord(newWord)}
-            onPracticeSpeakingWord={(word) => {
-              setSelectedWord(null);
-              onNavigateToSpeaking(word);
-            }}
+            onAudiobookCreated={onAudiobookCreated}
           />
         )}
       </div>
@@ -555,7 +608,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
 
         {/* Playback Controls & Utility Toggles */}
         <div className="flex flex-wrap items-center justify-between gap-4">
-          {/* Left: Reading Modes (Bilingual, Blur) */}
+          {/* Left: Reading Modes */}
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowPortuguese(!showPortuguese)}
@@ -647,75 +700,6 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
           </div>
         </div>
       </div>
-
-      {/* Chapter Drawer Modal */}
-      {isChapterDrawerOpen && audiobook.chapters && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in">
-          <div
-            className="w-full max-w-lg bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl p-6 space-y-4 max-h-[85vh] flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div className="flex items-center gap-2">
-                <ListOrdered className="w-5 h-5 text-indigo-400" />
-                <h3 className="font-bold text-white text-base">
-                  Índice de Capítulos ({audiobook.chapters.length})
-                </h3>
-              </div>
-              <button
-                onClick={() => setIsChapterDrawerOpen(false)}
-                className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="space-y-2 overflow-y-auto custom-scrollbar flex-1 pr-1">
-              {audiobook.chapters.map((ch, idx) => (
-                <button
-                  key={ch.id}
-                  onClick={() => switchChapter(idx)}
-                  className={`w-full text-left p-3.5 rounded-xl border transition flex items-center justify-between gap-3 ${
-                    currentChapterIdx === idx
-                      ? 'bg-indigo-600/20 border-indigo-500/60 text-white'
-                      : 'bg-slate-800/40 hover:bg-slate-800 border-slate-700/60 text-slate-300'
-                  }`}
-                >
-                  <div className="flex items-center gap-3 overflow-hidden">
-                    <span
-                      className={`w-7 h-7 rounded-lg flex items-center justify-center font-mono text-xs font-bold shrink-0 ${
-                        currentChapterIdx === idx
-                          ? 'bg-indigo-600 text-white'
-                          : 'bg-slate-800 text-slate-400'
-                      }`}
-                    >
-                      {idx + 1}
-                    </span>
-                    <div className="overflow-hidden">
-                      <div className="font-semibold text-sm truncate">{ch.title}</div>
-                      {ch.fileName && (
-                        <div className="text-[11px] text-slate-400 truncate font-mono">
-                          {ch.fileName}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <span className="text-xs font-mono text-slate-400 shrink-0">
-                    {formatTime(ch.duration)}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Voice Selector Modal */}
-      <VoiceSelectorModal
-        isOpen={isVoiceModalOpen}
-        onClose={() => setIsVoiceModalOpen(false)}
-      />
     </div>
   );
 };

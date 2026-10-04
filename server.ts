@@ -79,9 +79,9 @@ Ensure all timestamps are realistic, sequential, and cover every word accurately
 
     let response;
     if (audioBase64) {
-      // Audio transcription
+      // Audio transcription with gemini-3.8-flash for structured JSON with word cues & translations
       response = await ai.models.generateContent({
-        model: 'gemini-3.5-transcribe',
+        model: 'gemini-3.8-flash',
         contents: [
           {
             inlineData: {
@@ -108,8 +108,40 @@ Ensure all timestamps are realistic, sequential, and cover every word accurately
       });
     }
 
-    const text = response.text || '{}';
-    const parsed = JSON.parse(text);
+    let text = (response.text || '{}').trim();
+    // Clean any markdown code blocks
+    text = text.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (parseErr) {
+      console.warn('JSON.parse failed on transcription response, building fallback:', text.slice(0, 100));
+      const cleanText = text.replace(/[{}[\]"]/g, '').trim();
+      const rawSentences = cleanText.split(/(?<=[.?!])\s+/).filter(Boolean);
+      parsed = {
+        title,
+        summaryPt: 'Áudio importado e transcrito com IA.',
+        level: 'Intermediate',
+        totalDurationEstimate: rawSentences.length * 6,
+        sentences: rawSentences.map((s, idx) => ({
+          id: `s-${idx}`,
+          index: idx,
+          start: +(idx * 5).toFixed(2),
+          end: +((idx + 1) * 5).toFixed(2),
+          text: s.trim(),
+          translationPt: 'Tradução do áudio',
+          words: s.trim().split(/\s+/).map((w, wIdx) => ({
+            word: w,
+            cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+            start: +(idx * 5 + wIdx * 0.4).toFixed(2),
+            end: +(idx * 5 + (wIdx + 1) * 0.4).toFixed(2),
+            index: wIdx,
+          })),
+        })),
+      };
+    }
+
     return res.json(parsed);
   } catch (error: any) {
     console.error('Error in /api/transcribe-audio:', error);
