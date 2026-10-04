@@ -1,0 +1,6 @@
+{
+  "name": "EchoLingo - Aprenda Inglês com Audiolivros & IA",
+  "description": "Plataforma interativa de aprendizado de inglês com audiolivros sincronizados palavra por palavra, dicionário contextual com IA, repetição espaçada (SRS), laboratório de speaking com análise de pronúncia, listening e redação.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
