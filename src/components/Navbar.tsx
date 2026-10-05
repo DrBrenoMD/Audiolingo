@@ -9,9 +9,10 @@ import {
   Flame,
   Sparkles,
   BookOpen,
+  FolderOpen,
 } from 'lucide-react';
 
-export type NavTab = 'player' | 'speaking' | 'listening' | 'writing' | 'srs' | 'dashboard';
+export type NavTab = 'player' | 'media' | 'speaking' | 'listening' | 'writing' | 'srs' | 'dashboard';
 
 interface NavbarProps {
   activeTab: NavTab;
@@ -61,7 +62,19 @@ export const Navbar: React.FC<NavbarProps> = ({
             }`}
           >
             <BookOpen className="w-4 h-4" />
-            <span>Audiolivros</span>
+            <span>Player</span>
+          </button>
+
+          <button
+            onClick={() => onTabChange('media')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
+              activeTab === 'media'
+                ? 'bg-indigo-600 text-white shadow'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+            }`}
+          >
+            <FolderOpen className="w-4 h-4 text-amber-400" />
+            <span>Mídias & Livros</span>
           </button>
 
           <button
@@ -154,6 +167,12 @@ export const Navbar: React.FC<NavbarProps> = ({
           className={`px-2 py-1 rounded ${activeTab === 'player' ? 'text-indigo-400 font-bold' : 'text-slate-400'}`}
         >
           Player
+        </button>
+        <button
+          onClick={() => onTabChange('media')}
+          className={`px-2 py-1 rounded ${activeTab === 'media' ? 'text-indigo-400 font-bold' : 'text-slate-400'}`}
+        >
+          Mídias
         </button>
         <button
           onClick={() => onTabChange('speaking')}

@@ -29,6 +29,7 @@ import {
 import { WordLookupResult, SRSFlashcard, Audiobook, Chapter, Sentence, GrammarExplanationResult } from '../types';
 import { audioEngine, BrowserVoice } from '../utils/audioEngine';
 import { liveTranscriber } from '../utils/liveTranscription';
+import { getInstantWordLookup } from '../utils/instantDictionary';
 import confetti from 'canvas-confetti';
 
 export type SidePanelMode = 'word' | 'grammar' | 'chapters' | 'voice' | 'upload';
@@ -144,7 +145,14 @@ export const SidePanel: React.FC<SidePanelProps> = ({
       return;
     }
 
-    setLoadingWord(true);
+    // 0ms instant display from local dictionary if available
+    const instant = getInstantWordLookup(clean, contextSentence);
+    if (instant) {
+      setWordData(instant);
+      setLoadingWord(false);
+    } else {
+      setLoadingWord(true);
+    }
 
     fetch('/api/word-lookup', {
       method: 'POST',
@@ -152,12 +160,11 @@ export const SidePanel: React.FC<SidePanelProps> = ({
       body: JSON.stringify({
         word: clean,
         sentenceContext: contextSentence,
-        forceAI: false,
       }),
     })
       .then((r) => r.json())
       .then((res: WordLookupResult) => {
-        if (isMounted) {
+        if (isMounted && res && res.word) {
           setWordData(res);
           clientWordCache.set(cacheKey, res);
           setLoadingWord(false);

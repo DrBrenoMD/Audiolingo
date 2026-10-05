@@ -23,10 +23,12 @@ import {
   Radio,
   Loader2,
   Wand2,
+  AlertTriangle,
 } from 'lucide-react';
 import { Audiobook, Sentence, WordCue, SRSFlashcard, Chapter } from '../types';
 import { audioEngine } from '../utils/audioEngine';
 import { chunkTranscriber } from '../utils/chunkAudioTranscriber';
+import { adjustSentenceSync, snapSentenceToCurrentTime, isPlaceholderSentence } from '../utils/fuzzyAligner';
 import { SidePanel, SidePanelMode } from './SidePanel';
 import confetti from 'canvas-confetti';
 
@@ -37,6 +39,7 @@ interface AudiobookPlayerProps {
   onSelectAudiobook: (book: Audiobook) => void;
   allAudiobooks: Audiobook[];
   onAudiobookCreated: (newBook: Audiobook) => void;
+  onOpenMediaGallery?: () => void;
 }
 
 export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
@@ -46,6 +49,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   onSelectAudiobook,
   allAudiobooks,
   onAudiobookCreated,
+  onOpenMediaGallery,
 }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -92,9 +96,16 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
     }
-    const initial = currentChapter?.sentences || audiobook.sentences || [];
-    setDynamicSentences(initial);
-  }, [audiobook.id, currentChapterIdx]);
+    const raw = currentChapter?.sentences || audiobook.sentences || [];
+    // Sanitize any placeholders so they don't have fake word cues
+    const sanitized = raw.map((s) => (isPlaceholderSentence(s) ? { ...s, words: [] } : s));
+    setDynamicSentences(sanitized);
+
+    // Automatically kick off transcription for the first chunk if needed
+    if (activeAudioSrc && sanitized.some((s) => isPlaceholderSentence(s))) {
+      transcribeSliceAtTime(0);
+    }
+  }, [audiobook.id, currentChapterIdx, activeAudioSrc]);
 
   // Synchronize playback speed with audio element
   useEffect(() => {
@@ -144,7 +155,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
         setDynamicSentences((prev) => {
           // Filter out placeholder chunks in this time window and replace with real transcription
           const filtered = prev.filter(
-            (s) => !(s.start >= sliceStartSec - 0.5 && s.end <= sliceStartSec + 20.5 && s.text.includes('• ['))
+            (s) => !(s.start >= sliceStartSec - 0.5 && s.end <= sliceStartSec + 20.5 && isPlaceholderSentence(s))
           );
           const merged = [...filtered, ...newSentences].sort((a, b) => a.start - b.start);
           return merged;
@@ -177,7 +188,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
           (s) =>
             s.start >= sliceStart - 0.5 &&
             s.end <= sliceStart + 20.5 &&
-            (s.text.includes('• [') || s.text.startsWith('Chapter audio:') || s.text.startsWith('Trecho'))
+            isPlaceholderSentence(s)
         );
 
         if (isPlaceholder && !chunkTranscriber.hasCachedChunk(activeAudioSrc, sliceStart, 20)) {
@@ -283,6 +294,15 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
       colors: ['#6366f1', '#10b981'],
     });
     setTimeout(() => setSavedSentenceId(null), 2500);
+  };
+
+  // Nudge sentence timing to compensate for narration/text discrepancies
+  const handleNudgeSentence = (sentenceIdx: number, delta: number) => {
+    setDynamicSentences((prev) => adjustSentenceSync(prev, sentenceIdx, delta));
+  };
+
+  const handleSnapSentence = (sentenceIdx: number) => {
+    setDynamicSentences((prev) => snapSentenceToCurrentTime(prev, sentenceIdx, currentTime));
   };
 
   const formatTime = (secs: number) => {
@@ -444,6 +464,18 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
             ))}
           </select>
 
+          {/* Media Gallery Button */}
+          {onOpenMediaGallery && (
+            <button
+              onClick={onOpenMediaGallery}
+              className="text-xs px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 transition flex items-center gap-1.5 font-medium"
+              title="Abrir Galeria de Mídias para gerenciar, editar e excluir audiolivros"
+            >
+              <FolderOpen className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Galeria</span>
+            </button>
+          )}
+
           {/* Upload Button */}
           <button
             onClick={() => setSidePanelMode(sidePanelMode === 'upload' ? null : 'upload')}
@@ -504,6 +536,25 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
           ref={containerRef}
           className="flex-1 overflow-y-auto px-6 pt-6 pb-32 space-y-6 max-w-4xl mx-auto w-full custom-scrollbar"
         >
+          {/* Vercel 404 Diagnostics Banner */}
+          {chunkTranscriber.has404Error && (
+            <div className="p-4 rounded-xl bg-amber-950/50 border border-amber-600/60 text-xs text-amber-200 space-y-2">
+              <div className="font-bold flex items-center gap-2 text-amber-300 text-sm">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>Configuração de Backend no Vercel Necessária</span>
+              </div>
+              <p className="text-amber-200/90 leading-relaxed">
+                A rota <code className="bg-amber-900/60 px-1 py-0.5 rounded font-mono text-amber-100">/api/transcribe-chunk</code> retornou <strong>404</strong> no seu domínio da Vercel (<code className="font-mono text-amber-100">audiolingo-nu.vercel.app</code>).
+              </p>
+              <div className="bg-slate-900/60 p-2.5 rounded-lg border border-amber-800/40 text-[11px] space-y-1">
+                <p className="font-semibold text-white">Como resolver no seu Vercel:</p>
+                <p>1. O arquivo <code className="text-indigo-300 font-mono">vercel.json</code> e a rota serverless <code className="text-indigo-300 font-mono">api/index.ts</code> estão configurados no repositório.</p>
+                <p>2. Para transcrição Whisper ASR ultra-rápida, você pode adicionar <code className="text-indigo-300 font-mono">GROQ_API_KEY</code> em <strong>Settings → Environment Variables</strong> na Vercel.</p>
+                <p>3. Faça um novo <strong>Deploy</strong> (ou commit/push) para a Vercel compilar o backend serverless.</p>
+              </div>
+            </div>
+          )}
+
           {/* Prompt Banner */}
           <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800/80 text-xs text-slate-400 flex items-start justify-between gap-4">
             <div className="flex items-start gap-2">
@@ -522,7 +573,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
               const isCurrentSentence = activeSentenceIndex === sIdx;
               const sliceStart = Math.floor(sentence.start / 20) * 20;
               const isChunkTranscribing = transcribingSlices.has(sliceStart);
-              const isPlaceholder = sentence.text.includes('• [') || sentence.text.startsWith('Trecho');
+              const isPlaceholder = isPlaceholderSentence(sentence);
 
               return (
                 <div
@@ -535,7 +586,8 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                 >
                   {/* Sentence Header Actions */}
                   <div className="flex items-center justify-between gap-2 mb-2">
-                    <div className="flex items-center gap-2">
+                    {/* Sentence Timestamp & Sync Tuning */}
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <button
                         onClick={() => seek(sentence.start)}
                         className={`text-[11px] font-mono px-2 py-0.5 rounded transition ${
@@ -553,6 +605,31 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                           <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
                         </span>
                       )}
+
+                      {/* Sync Fine-Tuning for Audio-Text Discrepancies */}
+                      <div className="flex items-center gap-1 border-l border-slate-800 pl-1.5 ml-0.5">
+                        <button
+                          onClick={() => handleNudgeSentence(sIdx, -0.5)}
+                          className="px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-700 rounded transition font-mono"
+                          title="Adiantar este trecho em 0.5s"
+                        >
+                          -0.5s
+                        </button>
+                        <button
+                          onClick={() => handleNudgeSentence(sIdx, +0.5)}
+                          className="px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-700 rounded transition font-mono"
+                          title="Atrasar este trecho em 0.5s"
+                        >
+                          +0.5s
+                        </button>
+                        <button
+                          onClick={() => handleSnapSentence(sIdx)}
+                          className="px-1.5 py-0.5 text-[10px] text-indigo-300 hover:text-white bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-800/40 rounded transition"
+                          title="Alinhar início desta frase exatamente ao segundo atual do áudio"
+                        >
+                          🎯 Alinhar Aqui
+                        </button>
+                      </div>
                     </div>
 
                     <div className="flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition">
@@ -635,32 +712,44 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                     }`}
                   >
                     {isChunkTranscribing ? (
-                      <span className="flex items-center gap-2 text-indigo-300 text-sm font-sans animate-pulse">
+                      <span className="flex items-center gap-2 text-indigo-300 text-sm font-sans animate-pulse py-1">
                         <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
-                        <span>Fatiando e transcrevendo áudio deste trecho (20s)...</span>
+                        <span>Fatiando e transcrevendo áudio deste trecho ({formatTime(sentence.start)} - {formatTime(sentence.end)})...</span>
                       </span>
-                    ) : sentence.words && sentence.words.length > 0 && !isPlaceholder ? (
+                    ) : isPlaceholder ? (
+                      <span className="text-slate-400 font-sans text-sm italic flex items-center justify-between py-1">
+                        <span className="flex items-center gap-2 text-indigo-300/80">
+                          <Radio className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+                          <span>
+                            {sentence.text.startsWith('Audiobook narration segment')
+                              ? `Trecho de áudio (${formatTime(sentence.start)} - ${formatTime(sentence.end)}) • Aguardando transcrição automática...`
+                              : sentence.text}
+                          </span>
+                        </span>
+                      </span>
+                    ) : sentence.words && sentence.words.length > 0 ? (
                       sentence.words.map((cue, wIdx) => {
                         const isWordActive =
                           currentTime >= cue.start && currentTime <= cue.end;
                         const isWordSelected = selectedWord === cue.cleanWord;
 
                         return (
-                          <span
-                            key={wIdx}
-                            ref={isWordActive ? activeWordRef : null}
-                            onClick={() => handleWordClick(cue, sentence)}
-                            className={`inline-block px-1 py-0.5 rounded cursor-pointer transition-all duration-150 mr-1 select-text ${
-                              isWordActive
-                                ? 'bg-indigo-500 text-white font-semibold scale-105 shadow-md shadow-indigo-500/40 ring-2 ring-indigo-400/50'
-                                : isWordSelected
-                                ? 'bg-emerald-500/30 text-emerald-200 border-b-2 border-emerald-400'
-                                : 'hover:bg-indigo-950/60 hover:text-indigo-200 text-slate-200'
-                            }`}
-                            title="Clique para abrir detalhes na barra lateral sem tampar o texto"
-                          >
-                            {cue.word}
-                          </span>
+                          <React.Fragment key={wIdx}>
+                            <span
+                              ref={isWordActive ? activeWordRef : null}
+                              onClick={() => handleWordClick(cue, sentence)}
+                              className={`inline cursor-pointer select-text transition-colors duration-75 rounded px-1 -mx-0.5 py-0.5 ${
+                                isWordActive
+                                  ? 'bg-amber-400/35 text-amber-100 ring-1 ring-amber-400/60 shadow-sm'
+                                  : isWordSelected
+                                  ? 'bg-emerald-500/30 text-emerald-200 underline underline-offset-4 decoration-emerald-400'
+                                  : 'hover:bg-slate-800/80 text-slate-200'
+                              }`}
+                              title="Clique para abrir dicionário instantâneo (0ms)"
+                            >
+                              {cue.word}
+                            </span>{' '}
+                          </React.Fragment>
                         );
                       })
                     ) : (

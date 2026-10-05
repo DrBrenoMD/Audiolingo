@@ -2,8 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { sampleAudiobooks } from './data/sampleAudiobooks';
 import { Audiobook, SRSFlashcard, UserStats } from './types';
 import { getInitialFlashcards, saveFlashcardsToStorage } from './utils/srs';
+import { isPlaceholderSentence } from './utils/fuzzyAligner';
 import { Navbar, NavTab } from './components/Navbar';
 import { AudiobookPlayer } from './components/AudiobookPlayer';
+import { MediaManager } from './components/MediaManager';
 import { SpeakingLab } from './components/SpeakingLab';
 import { ListeningLab } from './components/ListeningLab';
 import { WritingLab } from './components/WritingLab';
@@ -19,8 +21,20 @@ export default function App() {
     const saved = localStorage.getItem(BOOKS_KEY);
     if (saved) {
       try {
-        const custom = JSON.parse(saved);
-        return [...sampleAudiobooks, ...custom];
+        const custom: Audiobook[] = JSON.parse(saved);
+        const normalized = custom.map((b) => ({
+          ...b,
+          sentences: (b.sentences || []).map((s) =>
+            isPlaceholderSentence(s) ? { ...s, words: [] } : s
+          ),
+          chapters: b.chapters?.map((c) => ({
+            ...c,
+            sentences: (c.sentences || []).map((s) =>
+              isPlaceholderSentence(s) ? { ...s, words: [] } : s
+            ),
+          })),
+        }));
+        return [...sampleAudiobooks, ...normalized];
       } catch (e) {
         console.error(e);
       }
@@ -109,6 +123,30 @@ export default function App() {
     setActiveTab('player');
   };
 
+  const handleUpdateAudiobook = (updated: Audiobook) => {
+    setAudiobooks((prev) => {
+      const next = prev.map((b) => (b.id === updated.id ? updated : b));
+      const customOnly = next.filter((b) => b.id.startsWith('custom-'));
+      localStorage.setItem(BOOKS_KEY, JSON.stringify(customOnly));
+      return next;
+    });
+    if (selectedAudiobook.id === updated.id) {
+      setSelectedAudiobook(updated);
+    }
+  };
+
+  const handleDeleteAudiobook = (bookId: string) => {
+    setAudiobooks((prev) => {
+      const next = prev.filter((b) => b.id !== bookId);
+      const customOnly = next.filter((b) => b.id.startsWith('custom-'));
+      localStorage.setItem(BOOKS_KEY, JSON.stringify(customOnly));
+      if (selectedAudiobook.id === bookId) {
+        setSelectedAudiobook(next[0] || sampleAudiobooks[0]);
+      }
+      return next;
+    });
+  };
+
   const handleNavigateToSpeaking = (sentence: string) => {
     setSpeakingSentence(sentence);
     setActiveTab('speaking');
@@ -125,7 +163,7 @@ export default function App() {
         dueCardsCount={dueCardsCount}
         streak={stats.currentStreak}
         onOpenUpload={() => {
-          setActiveTab('player');
+          setActiveTab('media');
         }}
       />
 
@@ -139,6 +177,22 @@ export default function App() {
             onSelectAudiobook={(b) => setSelectedAudiobook(b)}
             allAudiobooks={audiobooks}
             onAudiobookCreated={handleAudiobookCreated}
+            onOpenMediaGallery={() => setActiveTab('media')}
+          />
+        )}
+
+        {activeTab === 'media' && (
+          <MediaManager
+            audiobooks={audiobooks}
+            currentBookId={selectedAudiobook.id}
+            onSelectBook={(b) => {
+              setSelectedAudiobook(b);
+              setActiveTab('player');
+            }}
+            onUpdateBook={handleUpdateAudiobook}
+            onDeleteBook={handleDeleteAudiobook}
+            onAddBook={handleAudiobookCreated}
+            onClose={() => setActiveTab('player')}
           />
         )}
 

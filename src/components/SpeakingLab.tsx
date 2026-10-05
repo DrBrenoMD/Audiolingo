@@ -110,7 +110,7 @@ export const SpeakingLab: React.FC<SpeakingLabProps> = ({
     }
   };
 
-  // Run Gemini Evaluation
+  // Run Traditional Phonetic Evaluation
   const handleEvaluate = async (audioBlob?: Blob) => {
     setAnalyzing(true);
 

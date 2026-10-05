@@ -7,6 +7,8 @@ const chunkResultsCache = new Map<string, Sentence[]>();
 
 export class ChunkAudioTranscriber {
   private activeJobs = new Set<string>();
+  public has404Error: boolean = false;
+  private warned404: boolean = false;
 
   /**
    * Decodes an audio blob/file into memory. Cached for fast random slicing.
@@ -25,18 +27,23 @@ export class ChunkAudioTranscriber {
       audioBufferCache.set(blobUrl, decoded);
       return decoded;
     } finally {
-      // Keep audioCtx or close if needed
+      // Keep audioCtx active
     }
   }
 
   /**
-   * Transcribe a specific time slice (e.g. 20-30 seconds) on-the-fly
+   * Transcribe a specific time slice (e.g. 20 seconds) on-the-fly
    */
   async transcribeSlice(
     blobUrl: string,
     startSec: number,
     durationSec: number = 20
   ): Promise<Sentence[]> {
+    // If the deployment returned 404 for the API, avoid spamming requests
+    if (this.has404Error) {
+      return [];
+    }
+
     const chunkKey = `${blobUrl}_${Math.floor(startSec)}_${Math.floor(durationSec)}`;
 
     if (chunkResultsCache.has(chunkKey)) {
@@ -75,6 +82,17 @@ export class ChunkAudioTranscriber {
           duration: actualDuration,
         }),
       });
+
+      if (res.status === 404) {
+        this.has404Error = true;
+        if (!this.warned404) {
+          console.warn(
+            '[EchoLingo] A rota /api/transcribe-chunk retornou 404. Na Vercel, certifique-se de implantar com vercel.json e api/index.ts configurados.'
+          );
+          this.warned404 = true;
+        }
+        return [];
+      }
 
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);

@@ -39,6 +39,8 @@ export interface Audiobook {
   audioUrl?: string;
   audioBlob?: string; // base64 or blob url
   duration: number; // in seconds
+  totalDuration?: number; // in seconds
+  gradient?: string;
   description: string;
   level: 'Beginner' | 'Intermediate' | 'Advanced';
   category: string;
@@ -62,11 +64,13 @@ export interface ExampleSentence {
 export interface WordLookupResult {
   word: string;
   phonetic: string;
+  phoneticIpa?: string;
   audioUrl?: string;
-  source?: 'traditional_api' | 'ai';
+  source?: 'traditional_api' | 'ai' | 'traditional-dictionary-fast' | 'instant-memory-dictionary' | string;
   partOfSpeech: string;
   cefrLevel: CEFRLevel;
-  contextualTranslation: string;
+  contextualTranslation?: string;
+  translationPt?: string;
   contextualExplanation: string;
   definitions: WordDefinition[];
   synonyms: string[];
