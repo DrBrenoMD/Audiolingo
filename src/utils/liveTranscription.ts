@@ -159,6 +159,37 @@ class LiveTranscriptionService {
   }
 
   /**
+   * Convert raw recognized speech text into a structured timed Sentence with word cues
+   */
+  createSentenceFromSpeech(
+    text: string,
+    startTime: number,
+    endTime: number,
+    idx: number = 0
+  ): Sentence {
+    const cleanText = text.trim();
+    const rawWords = cleanText.split(/\s+/).filter(Boolean);
+    const duration = Math.max(0.5, endTime - startTime);
+    const wordDur = duration / Math.max(1, rawWords.length);
+
+    return {
+      id: `speech-${Date.now()}-${idx}`,
+      index: idx,
+      start: +startTime.toFixed(2),
+      end: +endTime.toFixed(2),
+      text: cleanText,
+      translationPt: '',
+      words: rawWords.map((w, wIdx) => ({
+        word: w,
+        cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+        start: +(startTime + wIdx * wordDur).toFixed(2),
+        end: +(startTime + (wIdx + 1) * wordDur).toFixed(2),
+        index: wIdx,
+      })),
+    };
+  }
+
+  /**
    * Generate lightweight progressive timeframes across the real duration of the audio
    */
   generateInitialTimeframes(totalDuration: number, chapterTitle: string): Sentence[] {
@@ -174,7 +205,7 @@ class LiveTranscriptionService {
       const endMin = Math.floor(end / 60);
       const endSec = Math.floor(end % 60);
 
-      const placeholderText = `${chapterTitle} • [${startMin}:${startSec < 10 ? '0' : ''}${startSec} - ${endMin}:${endSec < 10 ? '0' : ''}${endSec}]`;
+      const placeholderText = `${chapterTitle} [${startMin}:${startSec < 10 ? '0' : ''}${startSec} - ${endMin}:${endSec < 10 ? '0' : ''}${endSec}]`;
 
       results.push({
         id: `chunk-${i}`,
@@ -185,7 +216,7 @@ class LiveTranscriptionService {
         translationPt: `Trecho em reprodução (${startMin}:${startSec < 10 ? '0' : ''}${startSec} até ${endMin}:${endSec < 10 ? '0' : ''}${endSec})`,
         words: [
           { word: chapterTitle.split(' ')[0] || 'Audio', cleanWord: 'audio', start, end: +(start + (end - start) * 0.3).toFixed(2), index: 0 },
-          { word: 'section', cleanWord: 'section', start: +(start + (end - start) * 0.3).toFixed(2), end: +(start + (end - start) * 0.6).toFixed(2), index: 1 },
+          { word: 'playback', cleanWord: 'playback', start: +(start + (end - start) * 0.3).toFixed(2), end: +(start + (end - start) * 0.6).toFixed(2), index: 1 },
           { word: `[${startMin}:${startSec < 10 ? '0' : ''}${startSec}]`, cleanWord: 'time', start: +(start + (end - start) * 0.6).toFixed(2), end, index: 2 },
         ],
       });

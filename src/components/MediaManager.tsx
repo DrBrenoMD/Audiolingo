@@ -191,32 +191,59 @@ export const MediaManager: React.FC<MediaManagerProps> = ({
       });
 
       // 2. Extract or use text
-      let sentences: string[] = [];
+      let alignedSentences: Sentence[] = [];
       if (uploadTextFile) {
-        setProcessStatus('Lendo e estruturando texto do livro...');
+        setProcessStatus('Lendo e estruturando texto do livro/legenda...');
         const extracted = await extractBookFromFile(uploadTextFile);
-        sentences = extracted.sentences;
+        if (extracted.cues && extracted.cues.length > 0) {
+          setProcessStatus(`Aplicando ${extracted.cues.length} legendas sincronizadas com precisão milimétrica...`);
+          alignedSentences = extracted.cues.map((cue, idx) => {
+            const rawWords = cue.text.split(/\s+/).filter(Boolean);
+            const cueDur = Math.max(0.4, cue.end - cue.start);
+            const wordDur = cueDur / Math.max(1, rawWords.length);
+            return {
+              id: `srt-${idx}`,
+              index: idx,
+              start: +cue.start.toFixed(2),
+              end: +cue.end.toFixed(2),
+              text: cue.text,
+              translationPt: '',
+              words: rawWords.map((w, wIdx) => ({
+                word: w,
+                cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+                start: +(cue.start + wIdx * wordDur).toFixed(2),
+                end: +(cue.start + (wIdx + 1) * wordDur).toFixed(2),
+                index: wIdx,
+              })),
+            };
+          });
+        } else {
+          setProcessStatus(`Alinhando elasticamente ${extracted.sentences.length} frases com ${Math.round(audioDuration)}s de áudio...`);
+          alignedSentences = alignTextToAudio(extracted.sentences, audioDuration, {
+            leadInSeconds: leadInSeconds || 0.0,
+          });
+        }
       } else if (pastedText.trim().length > 0) {
-        sentences = pastedText.split(/(?<=[.?!])\s+/).map((s) => s.trim()).filter(Boolean);
+        const sentences = pastedText.split(/(?<=[.?!])\s+/).map((s) => s.trim()).filter(Boolean);
+        setProcessStatus(`Alinhando elasticamente ${sentences.length} frases com ${Math.round(audioDuration)}s de áudio...`);
+        alignedSentences = alignTextToAudio(sentences, audioDuration, {
+          leadInSeconds: leadInSeconds || 0.0,
+        });
       } else {
-        // Placeholder speech chunks for progressive Whisper transcription as audio plays
+        // Timeframe chunks for audio playback & native browser speech recognition
         const chunkCount = Math.max(1, Math.ceil(audioDuration / 20));
-        sentences = Array.from({ length: chunkCount }, (_, i) => {
+        const sentences = Array.from({ length: chunkCount }, (_, i) => {
           const sMin = Math.floor((i * 20) / 60);
           const sSec = Math.floor((i * 20) % 60);
           const eMin = Math.floor(Math.min(audioDuration, (i + 1) * 20) / 60);
           const eSec = Math.floor(Math.min(audioDuration, (i + 1) * 20) % 60);
           const timeTag = `${sMin}:${sSec.toString().padStart(2, '0')} - ${eMin}:${eSec.toString().padStart(2, '0')}`;
-          return `• [${timeTag}] Trecho de áudio a ser transcrito...`;
+          return `[${timeTag}] Faixa de áudio`;
+        });
+        alignedSentences = alignTextToAudio(sentences, audioDuration, {
+          leadInSeconds: leadInSeconds || 0.0,
         });
       }
-
-      setProcessStatus(`Alinhando elasticamente ${sentences.length} frases com ${Math.round(audioDuration)}s de áudio...`);
-
-      // 3. Elastic fuzzy alignment with difference tolerance
-      const alignedSentences = alignTextToAudio(sentences, audioDuration, {
-        leadInSeconds: leadInSeconds || 0.0,
-      });
 
       const newId = `custom-${Date.now()}`;
       const finalTitle = newTitle.trim() || uploadAudioFile.name.replace(/\.[^/.]+$/, '');
@@ -238,7 +265,7 @@ export const MediaManager: React.FC<MediaManagerProps> = ({
         level: newLevel,
         duration: audioDuration,
         totalDuration: audioDuration,
-        description: 'Audiolivro importado com sincronização elástica áudio + texto.',
+        description: uploadTextFile ? 'Audiolivro importado com sincronização elástica áudio + texto.' : 'Audiolivro com reprodução de áudio e reconhecimento nativo Web Speech.',
         category: 'Estudo Personalizado',
         sentences: alignedSentences,
         coverUrl: 'https://images.unsplash.com/photo-1512820790803-83ca734da794?w=800&auto=format&fit=crop&q=80',

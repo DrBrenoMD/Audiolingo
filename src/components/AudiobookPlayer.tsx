@@ -28,6 +28,7 @@ import {
 import { Audiobook, Sentence, WordCue, SRSFlashcard, Chapter } from '../types';
 import { audioEngine } from '../utils/audioEngine';
 import { chunkTranscriber } from '../utils/chunkAudioTranscriber';
+import { liveTranscriber } from '../utils/liveTranscription';
 import { adjustSentenceSync, snapSentenceToCurrentTime, isPlaceholderSentence } from '../utils/fuzzyAligner';
 import { SidePanel, SidePanelMode } from './SidePanel';
 import confetti from 'canvas-confetti';
@@ -62,11 +63,12 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   const [repeatSentenceMode, setRepeatSentenceMode] = useState<boolean>(false);
   const [savedSentenceId, setSavedSentenceId] = useState<string | null>(null);
 
-  // Progressive JIT Transcription State
+  // Progressive JIT Transcription & Native Web Speech State
   const [autoTranscribeActive, setAutoTranscribeActive] = useState<boolean>(true);
   const [batchTranscribing, setBatchTranscribing] = useState<boolean>(false);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
   const [transcribingSlices, setTranscribingSlices] = useState<Set<number>>(new Set());
+  const [isWebSpeechActive, setIsWebSpeechActive] = useState<boolean>(false);
 
   // Dynamic sentence store allowing progressive updates to the current chapter
   const [currentChapterIdx, setCurrentChapterIdx] = useState<number>(
@@ -215,23 +217,71 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     }
   }, [isPlaying, autoTranscribeActive, Math.floor(currentTime / 6), activeAudioSrc, displayDuration, dynamicSentences.length]);
 
-  // Transcribe whole chapter in the background with live progress tracking
-  const handleTranscribeWholeChapterInBackground = async () => {
-    if (!activeAudioSrc || batchTranscribing) return;
-    setBatchTranscribing(true);
-    try {
-      const totalDur = displayDuration;
-      const slicesCount = Math.ceil(totalDur / 20);
-      setBatchProgress({ current: 0, total: slicesCount });
+  // Stop Web Speech listening on unmount
+  useEffect(() => {
+    return () => {
+      liveTranscriber.stopListening();
+    };
+  }, []);
 
-      for (let i = 0; i < slicesCount; i++) {
-        const start = i * 20;
-        await transcribeSliceAtTime(start);
-        setBatchProgress({ current: i + 1, total: slicesCount });
-      }
-    } finally {
-      setBatchTranscribing(false);
-      setBatchProgress(null);
+  // Native Web Speech recognition (Runs 100% in browser, Zero AI, Zero Keys)
+  const toggleWebSpeech = () => {
+    if (!isWebSpeechActive) {
+      liveTranscriber.startListening((text, isFinal) => {
+        if (isFinal && text.trim().length > 0) {
+          const startTime = Math.max(0, currentTime - 3.5);
+          const endTime = Math.max(startTime + 1.0, currentTime);
+          const newSentence = liveTranscriber.createSentenceFromSpeech(
+            text,
+            startTime,
+            endTime,
+            dynamicSentences.length
+          );
+
+          // Fast Portuguese translation via traditional API
+          fetch('/api/fast-translate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: text.trim() }),
+          })
+            .then((r) => r.json())
+            .then((data) => {
+              if (data?.translatedText) {
+                newSentence.translationPt = data.translatedText;
+              }
+              setDynamicSentences((prev) => {
+                const filtered = prev.filter(
+                  (s) =>
+                    !(isPlaceholderSentence(s) &&
+                      Math.max(s.start, startTime) < Math.min(s.end, endTime))
+                );
+                const merged = [...filtered, newSentence].sort((a, b) => a.start - b.start);
+                if (onUpdateAudiobook && audiobook) {
+                  onUpdateAudiobook({
+                    ...audiobook,
+                    sentences: merged,
+                  });
+                }
+                return merged;
+              });
+            })
+            .catch(() => {
+              setDynamicSentences((prev) => {
+                const filtered = prev.filter(
+                  (s) =>
+                    !(isPlaceholderSentence(s) &&
+                      Math.max(s.start, startTime) < Math.min(s.end, endTime))
+                );
+                const merged = [...filtered, newSentence].sort((a, b) => a.start - b.start);
+                return merged;
+              });
+            });
+        }
+      });
+      setIsWebSpeechActive(true);
+    } else {
+      liveTranscriber.stopListening();
+      setIsWebSpeechActive(false);
     }
   };
 
@@ -432,27 +482,19 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
             </button>
           )}
 
-          {/* Background Batch Chapter Transcribe */}
-          {activeAudioSrc && (
+          {/* Native Web Speech Recognition (Zero AI) */}
+          {liveTranscriber.isSupported() && (
             <button
-              onClick={handleTranscribeWholeChapterInBackground}
-              disabled={batchTranscribing}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-indigo-950 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg border border-slate-700 transition"
-              title="Transcrever todos os blocos de 20s do capítulo em segundo plano"
+              onClick={toggleWebSpeech}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition ${
+                isWebSpeechActive
+                  ? 'bg-emerald-600 text-white border-emerald-500 shadow-md animate-pulse'
+                  : 'bg-slate-800 hover:bg-slate-700 text-emerald-400 border-slate-700'
+              }`}
+              title="Ativar reconhecimento de voz nativo do navegador (Web Speech API - Zero IA / Sem chaves)"
             >
-              {batchTranscribing ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
-                  <span>
-                    Transcrevendo ({batchProgress ? `${batchProgress.current}/${batchProgress.total}` : 'iniciando...'})
-                  </span>
-                </>
-              ) : (
-                <>
-                  <Wand2 className="w-3.5 h-3.5 text-indigo-400" />
-                  <span>Transcrever Capítulo</span>
-                </>
-              )}
+              <Mic className="w-3.5 h-3.5" />
+              <span>{isWebSpeechActive ? 'Web Speech Ativo' : 'Reconhecer Fala (Web Speech)'}</span>
             </button>
           )}
 
@@ -677,25 +719,15 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                     </div>
 
                     <div className="flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition">
-                      {/* One-click manual chunk transcribe button if placeholder */}
-                      {isPlaceholder && (
+                      {/* One-click Web Speech recognize if placeholder */}
+                      {isPlaceholder && liveTranscriber.isSupported() && (
                         <button
-                          onClick={() => transcribeSliceAtTime(sliceStart)}
-                          disabled={isChunkTranscribing}
+                          onClick={toggleWebSpeech}
                           className="flex items-center gap-1 px-2 py-0.5 text-[11px] text-emerald-300 bg-emerald-950/40 hover:bg-emerald-950 border border-emerald-800/60 rounded transition"
-                          title="Transcrever este trecho específico de 20s"
+                          title="Usar reconhecimento nativo do navegador para capturar a fala deste trecho (Web Speech API - Zero IA)"
                         >
-                          {isChunkTranscribing ? (
-                            <>
-                              <Loader2 className="w-3 h-3 animate-spin text-emerald-400" />
-                              <span>Processando...</span>
-                            </>
-                          ) : (
-                            <>
-                              <Wand2 className="w-3 h-3 text-emerald-400" />
-                              <span>Transcrever Trecho (20s)</span>
-                            </>
-                          )}
+                          <Mic className="w-3 h-3 text-emerald-400" />
+                          <span>{isWebSpeechActive ? 'Escutando...' : 'Reconhecer (Web Speech)'}</span>
                         </button>
                       )}
 
@@ -755,17 +787,12 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                       blurEnglish ? 'blur-sm select-none hover:blur-none transition-all' : ''
                     }`}
                   >
-                    {isChunkTranscribing ? (
-                      <span className="flex items-center gap-2 text-indigo-300 text-sm font-sans animate-pulse py-1">
-                        <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
-                        <span>Fatiando e transcrevendo áudio deste trecho ({formatTime(sentence.start)} - {formatTime(sentence.end)})...</span>
-                      </span>
-                    ) : isPlaceholder ? (
+                    {isPlaceholder ? (
                       <span className="text-slate-400 font-sans text-sm italic flex items-center justify-between py-1">
                         <span className="flex items-center gap-2 text-indigo-300/90">
                           <Radio className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
                           <span>
-                            {`Áudio do capítulo (${formatTime(sentence.start)} - ${formatTime(sentence.end)}) • Transcrição em andamento...`}
+                            {`Áudio do capítulo (${formatTime(sentence.start)} - ${formatTime(sentence.end)}) • Reproduza o áudio ou ative a Web Speech API para reconhecer a fala nativamente`}
                           </span>
                         </span>
                       </span>

@@ -168,8 +168,6 @@ export const UploadModal: React.FC<UploadModalProps> = ({
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              audioBase64,
-              mimeType: item.file.type || 'audio/mp3',
               title: item.cleanTitle,
               providedText: i === 0 && referenceText ? referenceText : undefined,
             }),

@@ -192,7 +192,7 @@ export const SpeakingLab: React.FC<SpeakingLabProps> = ({
         <div>
           <h2 className="text-2xl font-bold text-white flex items-center gap-2.5">
             <Mic className="w-6 h-6 text-emerald-400" />
-            <span>Laboratório de Speaking & Shadowing com IA</span>
+            <span>Laboratório de Speaking & Shadowing</span>
           </h2>
           <p className="text-sm text-slate-400 mt-1">
             Grave sua fala, receba notas detalhadas de pronúncia, fonética e dicas específicas para brasileiros.

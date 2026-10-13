@@ -15,14 +15,13 @@ export function isPlaceholderSentence(sentence: { text?: string; id?: string } |
   if (!sentence || !sentence.text) return true;
   const t = sentence.text.trim();
   return (
-    t.startsWith('Audiobook narration segment') ||
     t.startsWith('Audio playback segment') ||
     t.startsWith('Chapter audio:') ||
     t.startsWith('Trecho') ||
     t.includes('• [') ||
     t.includes('Aguardando transcrição') ||
-    t.includes('Configure GROQ_API_KEY') ||
-    sentence.id?.startsWith('placeholder-') === true
+    sentence.id?.startsWith('placeholder-') === true ||
+    sentence.id?.startsWith('chunk-') === true
   );
 }
 

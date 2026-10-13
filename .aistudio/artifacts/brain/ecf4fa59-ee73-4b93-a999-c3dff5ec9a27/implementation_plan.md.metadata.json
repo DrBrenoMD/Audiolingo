@@ -1,0 +1,6 @@
+{
+  "summary": "Plano de implementação para remover 100% das dependências de IA e adotar transcrição tradicional com Web Speech API nativa e alinhador elástico de texto e legendas (.srt/.vtt/.txt/.epub), garantindo execução perfeita e autônoma fora do Google AI Studio.",
+  "updatedAt": "2026-10-13T19:31:11.715862061Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

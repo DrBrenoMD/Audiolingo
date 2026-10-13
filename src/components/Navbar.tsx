@@ -110,7 +110,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             }`}
           >
             <PenTool className="w-4 h-4 text-purple-400" />
-            <span>Escrita IA</span>
+            <span>Escrita & Gramática</span>
           </button>
 
           <button
