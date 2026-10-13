@@ -181,27 +181,34 @@ export const ProgressDashboard: React.FC<ProgressDashboardProps> = ({
           <BookOpen className="w-5 h-5 text-indigo-400" />
           <span>Sua Coleção de Audiolivros Ativos</span>
         </h4>
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-          {allAudiobooks.map((book) => (
-            <div
-              key={book.id}
-              className="bg-slate-900/60 border border-slate-800 hover:border-indigo-500/50 p-4 rounded-2xl flex items-center gap-3 transition group"
-            >
-              <img
-                src={book.coverUrl}
-                alt={book.title}
-                className="w-12 h-12 rounded-xl object-cover border border-slate-700 shrink-0"
-              />
-              <div className="overflow-hidden">
-                <div className="text-sm font-bold text-white truncate font-serif group-hover:text-indigo-300 transition">
-                  {book.title}
+        {allAudiobooks.length === 0 ? (
+          <div className="p-8 text-center rounded-2xl bg-slate-900/40 border border-slate-800 text-slate-400 space-y-2">
+            <BookOpen className="w-8 h-8 mx-auto text-slate-600" />
+            <p className="text-xs text-slate-400">Nenhum audiolivro ativo no momento. Adicione um audiolivro na Galeria de Mídias para acompanhar seu progresso aqui.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+            {allAudiobooks.map((book) => (
+              <div
+                key={book.id}
+                className="bg-slate-900/60 border border-slate-800 hover:border-indigo-500/50 p-4 rounded-2xl flex items-center gap-3 transition group"
+              >
+                <img
+                  src={book.coverUrl}
+                  alt={book.title}
+                  className="w-12 h-12 rounded-xl object-cover border border-slate-700 shrink-0"
+                />
+                <div className="overflow-hidden">
+                  <div className="text-sm font-bold text-white truncate font-serif group-hover:text-indigo-300 transition">
+                    {book.title}
+                  </div>
+                  <div className="text-xs text-slate-400 truncate">{book.author}</div>
+                  <span className="text-[10px] font-semibold text-indigo-400">{book.level}</span>
                 </div>
-                <div className="text-xs text-slate-400 truncate">{book.author}</div>
-                <span className="text-[10px] font-semibold text-indigo-400">{book.level}</span>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

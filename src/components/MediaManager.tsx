@@ -97,7 +97,7 @@ export const MediaManager: React.FC<MediaManagerProps> = ({
 
   // Audio preview toggle
   const togglePreview = (book: Audiobook) => {
-    const audioUrl = book.chapters?.[0]?.audioUrl || book.coverUrl;
+    const audioUrl = book.chapters?.[0]?.audioUrl || book.audioUrl || '';
     if (!audioUrl) return;
 
     if (previewPlayingId === book.id) {
@@ -448,16 +448,14 @@ export const MediaManager: React.FC<MediaManagerProps> = ({
                       <Edit2 className="w-3.5 h-3.5" />
                     </button>
 
-                    {/* Delete Custom Book */}
-                    {book.id.startsWith('custom-') && (
-                      <button
-                        onClick={() => setDeletingBookId(book.id)}
-                        className="p-2 rounded-xl text-rose-400/80 hover:text-rose-300 hover:bg-rose-950/50 transition"
-                        title="Excluir este audiolivro"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    )}
+                    {/* Delete Book */}
+                    <button
+                      onClick={() => setDeletingBookId(book.id)}
+                      className="p-2 rounded-xl text-rose-400/80 hover:text-rose-300 hover:bg-rose-950/50 transition"
+                      title="Excluir este audiolivro"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 </div>
               </div>
@@ -465,13 +463,32 @@ export const MediaManager: React.FC<MediaManagerProps> = ({
           })}
         </div>
 
-        {filteredBooks.length === 0 && (
+        {audiobooks.length === 0 ? (
+          <div className="py-16 px-6 text-center rounded-3xl bg-slate-900/40 border border-slate-800/80 text-slate-300 max-w-xl mx-auto space-y-4 shadow-xl">
+            <div className="w-16 h-16 rounded-2xl bg-indigo-950/80 border border-indigo-800/50 flex items-center justify-center text-indigo-400 mx-auto shadow-lg shadow-indigo-950/40">
+              <FolderOpen className="w-8 h-8" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-white">Sua Galeria está vazia</h3>
+              <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto leading-relaxed">
+                Adicione seu primeiro audiolivro com arquivo de áudio (.mp3, .m4a, .wav) e opcionalmente o texto (.pdf, .epub, .txt) para começar seus estudos com transcrição e destaque palavra por palavra.
+              </p>
+            </div>
+            <button
+              onClick={() => setShowUploadModal(true)}
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-semibold text-xs rounded-xl shadow-lg shadow-indigo-950/50 transition"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Adicionar Primeiro Audiolivro</span>
+            </button>
+          </div>
+        ) : filteredBooks.length === 0 ? (
           <div className="p-12 text-center rounded-2xl bg-slate-900/30 border border-slate-800 text-slate-400 space-y-2">
             <FolderOpen className="w-8 h-8 mx-auto text-slate-600" />
             <p className="text-sm font-medium">Nenhuma mídia encontrada com os filtros atuais.</p>
             <p className="text-xs text-slate-500">Tente buscar por outro termo ou clique no botão acima para importar uma nova obra.</p>
           </div>
-        )}
+        ) : null}
       </div>
 
       {/* Edit Book Modal */}

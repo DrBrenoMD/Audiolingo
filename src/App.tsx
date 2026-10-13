@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import { sampleAudiobooks } from './data/sampleAudiobooks';
 import { Audiobook, SRSFlashcard, UserStats } from './types';
 import { getInitialFlashcards, saveFlashcardsToStorage } from './utils/srs';
 import { isPlaceholderSentence } from './utils/fuzzyAligner';
@@ -16,13 +15,25 @@ const STATS_KEY = 'echolingo_stats_data';
 const BOOKS_KEY = 'echolingo_custom_books';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<NavTab>('player');
+  const [activeTab, setActiveTab] = useState<NavTab>('media');
   const [audiobooks, setAudiobooks] = useState<Audiobook[]>(() => {
     const saved = localStorage.getItem(BOOKS_KEY);
     if (saved) {
       try {
         const custom: Audiobook[] = JSON.parse(saved);
-        const normalized = custom.map((b) => ({
+        // Delete and filter out all example/sample/demo audiobooks
+        const userBooks = custom.filter(
+          (b) =>
+            !b.id.startsWith('demo') &&
+            !b.id.startsWith('sample') &&
+            !b.id.startsWith('example') &&
+            !b.id.startsWith('default')
+        );
+        // Sync filtered storage
+        if (userBooks.length !== custom.length) {
+          localStorage.setItem(BOOKS_KEY, JSON.stringify(userBooks));
+        }
+        const normalized = userBooks.map((b) => ({
           ...b,
           sentences: (b.sentences || []).map((s) =>
             isPlaceholderSentence(s) ? { ...s, words: [] } : s
@@ -34,15 +45,15 @@ export default function App() {
             ),
           })),
         }));
-        return [...sampleAudiobooks, ...normalized];
+        return normalized;
       } catch (e) {
         console.error(e);
       }
     }
-    return sampleAudiobooks;
+    return [];
   });
 
-  const [selectedAudiobook, setSelectedAudiobook] = useState<Audiobook>(audiobooks[0]);
+  const [selectedAudiobook, setSelectedAudiobook] = useState<Audiobook | null>(() => audiobooks[0] || null);
   const [cards, setCards] = useState<SRSFlashcard[]>(() => getInitialFlashcards());
   const [speakingSentence, setSpeakingSentence] = useState<string>('');
 
@@ -87,7 +98,7 @@ export default function App() {
       backTranslation: newCardData.backTranslation || '',
       phonetic: newCardData.phonetic,
       notes: newCardData.notes,
-      audiobookTitle: newCardData.audiobookTitle || selectedAudiobook.title,
+      audiobookTitle: newCardData.audiobookTitle || selectedAudiobook?.title || 'Audiolivro',
       dateAdded: Date.now(),
       dueDate: Date.now(),
       interval: 1,
@@ -126,11 +137,10 @@ export default function App() {
   const handleUpdateAudiobook = (updated: Audiobook) => {
     setAudiobooks((prev) => {
       const next = prev.map((b) => (b.id === updated.id ? updated : b));
-      const customOnly = next.filter((b) => b.id.startsWith('custom-'));
-      localStorage.setItem(BOOKS_KEY, JSON.stringify(customOnly));
+      localStorage.setItem(BOOKS_KEY, JSON.stringify(next));
       return next;
     });
-    if (selectedAudiobook.id === updated.id) {
+    if (selectedAudiobook?.id === updated.id) {
       setSelectedAudiobook(updated);
     }
   };
@@ -138,10 +148,9 @@ export default function App() {
   const handleDeleteAudiobook = (bookId: string) => {
     setAudiobooks((prev) => {
       const next = prev.filter((b) => b.id !== bookId);
-      const customOnly = next.filter((b) => b.id.startsWith('custom-'));
-      localStorage.setItem(BOOKS_KEY, JSON.stringify(customOnly));
-      if (selectedAudiobook.id === bookId) {
-        setSelectedAudiobook(next[0] || sampleAudiobooks[0]);
+      localStorage.setItem(BOOKS_KEY, JSON.stringify(next));
+      if (selectedAudiobook?.id === bookId) {
+        setSelectedAudiobook(next[0] || null);
       }
       return next;
     });
@@ -177,6 +186,7 @@ export default function App() {
             onSelectAudiobook={(b) => setSelectedAudiobook(b)}
             allAudiobooks={audiobooks}
             onAudiobookCreated={handleAudiobookCreated}
+            onUpdateAudiobook={handleUpdateAudiobook}
             onOpenMediaGallery={() => setActiveTab('media')}
           />
         )}
@@ -184,7 +194,7 @@ export default function App() {
         {activeTab === 'media' && (
           <MediaManager
             audiobooks={audiobooks}
-            currentBookId={selectedAudiobook.id}
+            currentBookId={selectedAudiobook?.id || ''}
             onSelectBook={(b) => {
               setSelectedAudiobook(b);
               setActiveTab('player');

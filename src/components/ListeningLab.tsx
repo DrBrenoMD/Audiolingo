@@ -18,7 +18,7 @@ import { audioEngine } from '../utils/audioEngine';
 import confetti from 'canvas-confetti';
 
 interface ListeningLabProps {
-  currentAudiobook: Audiobook;
+  currentAudiobook: Audiobook | null;
 }
 
 export const ListeningLab: React.FC<ListeningLabProps> = ({ currentAudiobook }) => {
@@ -41,6 +41,11 @@ export const ListeningLab: React.FC<ListeningLabProps> = ({ currentAudiobook }) 
   const [speedLevel, setSpeedLevel] = useState<number>(0.8);
 
   const fetchChallenges = () => {
+    if (!currentAudiobook || !currentAudiobook.sentences?.length) {
+      setChallenges([]);
+      return;
+    }
+
     setLoadingChallenges(true);
     setDictationSubmitted(false);
     setDictationInput('');
@@ -100,8 +105,10 @@ export const ListeningLab: React.FC<ListeningLabProps> = ({ currentAudiobook }) 
   };
 
   useEffect(() => {
-    fetchChallenges();
-  }, [currentAudiobook.id]);
+    if (currentAudiobook?.id) {
+      fetchChallenges();
+    }
+  }, [currentAudiobook?.id]);
 
   const currentChallenge = challenges[currentIdx];
 
@@ -158,6 +165,20 @@ export const ListeningLab: React.FC<ListeningLabProps> = ({ currentAudiobook }) 
       setQuizSubmitted(false);
     }
   };
+
+  if (!currentAudiobook || !currentAudiobook.sentences || currentAudiobook.sentences.length === 0) {
+    return (
+      <div className="max-w-xl mx-auto px-6 py-20 text-center space-y-4 text-slate-100">
+        <div className="w-16 h-16 rounded-2xl bg-indigo-950/60 border border-indigo-800/40 flex items-center justify-center text-indigo-400 mx-auto shadow-xl">
+          <Headphones className="w-8 h-8" />
+        </div>
+        <h3 className="text-xl font-bold text-white">Nenhum audiolivro carregado</h3>
+        <p className="text-xs text-slate-400 leading-relaxed max-w-md mx-auto">
+          Para treinar seu listening com ditados, desafios e quizzes interativos, escolha ou importe um audiolivro na Galeria de Mídias.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-8 space-y-8 text-slate-100">

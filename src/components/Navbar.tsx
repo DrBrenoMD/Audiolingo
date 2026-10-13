@@ -34,7 +34,7 @@ export const Navbar: React.FC<NavbarProps> = ({
       <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
         {/* Brand */}
         <div
-          onClick={() => onTabChange('player')}
+          onClick={() => onTabChange('media')}
           className="flex items-center gap-2.5 cursor-pointer group shrink-0"
         >
           <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 via-purple-600 to-pink-500 p-0.5 shadow-lg shadow-indigo-950/50">
@@ -54,6 +54,18 @@ export const Navbar: React.FC<NavbarProps> = ({
         {/* Navigation Tabs */}
         <nav className="hidden md:flex items-center gap-1 bg-slate-900/80 border border-slate-800 p-1 rounded-2xl">
           <button
+            onClick={() => onTabChange('media')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
+              activeTab === 'media'
+                ? 'bg-indigo-600 text-white shadow'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+            }`}
+          >
+            <FolderOpen className="w-4 h-4 text-amber-400" />
+            <span>Galeria de Mídias</span>
+          </button>
+
+          <button
             onClick={() => onTabChange('player')}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
               activeTab === 'player'
@@ -63,18 +75,6 @@ export const Navbar: React.FC<NavbarProps> = ({
           >
             <BookOpen className="w-4 h-4" />
             <span>Player</span>
-          </button>
-
-          <button
-            onClick={() => onTabChange('media')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
-              activeTab === 'media'
-                ? 'bg-indigo-600 text-white shadow'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
-            }`}
-          >
-            <FolderOpen className="w-4 h-4 text-amber-400" />
-            <span>Mídias & Livros</span>
           </button>
 
           <button
@@ -163,16 +163,16 @@ export const Navbar: React.FC<NavbarProps> = ({
       {/* Mobile Submenu Bar */}
       <div className="md:hidden flex items-center justify-around px-2 py-2 border-t border-slate-800/80 bg-slate-900/80 text-[11px] font-medium overflow-x-auto">
         <button
-          onClick={() => onTabChange('player')}
-          className={`px-2 py-1 rounded ${activeTab === 'player' ? 'text-indigo-400 font-bold' : 'text-slate-400'}`}
-        >
-          Player
-        </button>
-        <button
           onClick={() => onTabChange('media')}
           className={`px-2 py-1 rounded ${activeTab === 'media' ? 'text-indigo-400 font-bold' : 'text-slate-400'}`}
         >
           Mídias
+        </button>
+        <button
+          onClick={() => onTabChange('player')}
+          className={`px-2 py-1 rounded ${activeTab === 'player' ? 'text-indigo-400 font-bold' : 'text-slate-400'}`}
+        >
+          Player
         </button>
         <button
           onClick={() => onTabChange('speaking')}

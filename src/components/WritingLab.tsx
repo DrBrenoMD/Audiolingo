@@ -13,7 +13,7 @@ import { Audiobook, WritingEvaluationResult } from '../types';
 import confetti from 'canvas-confetti';
 
 interface WritingLabProps {
-  currentAudiobook: Audiobook;
+  currentAudiobook: Audiobook | null;
   onRecordWriting?: () => void;
 }
 
@@ -23,16 +23,18 @@ export const WritingLab: React.FC<WritingLabProps> = ({ currentAudiobook, onReco
   const [evaluating, setEvaluating] = useState(false);
   const [result, setResult] = useState<WritingEvaluationResult | null>(null);
 
+  const bookTitle = currentAudiobook?.title || 'Audiolivro';
+
   const prompts = {
-    summary: `Escreva um resumo em inglês (3 a 5 frases) sobre os pontos principais que você ouviu em "${currentAudiobook.title}".`,
-    reflection: `Qual é a sua opinião sobre as ideias transmitidas pelo autor em "${currentAudiobook.title}"? Dê exemplos da sua própria vida.`,
-    creative: `Imagine uma conversa entre você e o narrador/personagem principal de "${currentAudiobook.title}". Escreva o diálogo em inglês.`,
+    summary: `Escreva um resumo em inglês (3 a 5 frases) sobre os pontos principais que você ouviu em "${bookTitle}".`,
+    reflection: `Qual é a sua opinião sobre as ideias transmitidas pelo autor em "${bookTitle}"? Dê exemplos da sua própria vida.`,
+    creative: `Imagine uma conversa entre você e o narrador/personagem principal de "${bookTitle}". Escreva o diálogo em inglês.`,
   };
 
   // Recommended vocabulary extracted from the book
-  const suggestedVocabulary = currentAudiobook.sentences
-    .flatMap((s) => s.words)
-    .filter((w) => w.cleanWord.length > 5)
+  const suggestedVocabulary = (currentAudiobook?.sentences || [])
+    .flatMap((s) => s.words || [])
+    .filter((w) => w && w.cleanWord && w.cleanWord.length > 5)
     .slice(0, 8)
     .map((w) => w.cleanWord);
 
@@ -48,8 +50,8 @@ export const WritingLab: React.FC<WritingLabProps> = ({ currentAudiobook, onReco
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           studentText: text,
-          promptContext: `${prompts[promptTopic]} (Livro: ${currentAudiobook.title})`,
-          targetLevel: currentAudiobook.level === 'Beginner' ? 'B1' : 'B2',
+          promptContext: `${prompts[promptTopic]} (Livro: ${bookTitle})`,
+          targetLevel: currentAudiobook?.level === 'Beginner' ? 'B1' : 'B2',
         }),
       });
 
@@ -73,6 +75,20 @@ export const WritingLab: React.FC<WritingLabProps> = ({ currentAudiobook, onReco
   };
 
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
+
+  if (!currentAudiobook || !currentAudiobook.sentences || currentAudiobook.sentences.length === 0) {
+    return (
+      <div className="max-w-xl mx-auto px-6 py-20 text-center space-y-4 text-slate-100">
+        <div className="w-16 h-16 rounded-2xl bg-purple-950/60 border border-purple-800/40 flex items-center justify-center text-purple-400 mx-auto shadow-xl">
+          <PenTool className="w-8 h-8" />
+        </div>
+        <h3 className="text-xl font-bold text-white">Nenhum audiolivro carregado</h3>
+        <p className="text-xs text-slate-400 leading-relaxed max-w-md mx-auto">
+          Para praticar produção textual em inglês com feedback contextual da obra, escolha ou importe um audiolivro na Galeria de Mídias.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-8 space-y-8 text-slate-100">

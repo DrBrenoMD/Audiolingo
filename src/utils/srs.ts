@@ -76,62 +76,7 @@ export function getInitialFlashcards(): SRSFlashcard[] {
     }
   }
 
-  const initialDeck: SRSFlashcard[] = [
-    {
-      id: 'card-1',
-      type: 'sentence',
-      frontText: 'In my younger and more 【vulnerable】 years my father gave me some advice.',
-      contextSentence: 'Palavra em foco: vulnerable (/ˈvʌl.nər.ə.bəl/)',
-      backTranslation: 'Nos meus anos mais jovens e mais vulneráveis, meu pai me deu um conselho.',
-      phonetic: '/ˈvʌl.nər.ə.bəl/',
-      notes: 'Palavra chave: VULNERABLE = "vulnerável, suscetível" • The Great Gatsby',
-      audiobookTitle: 'The Great Gatsby',
-      dateAdded: Date.now() - 3 * 86400000,
-      dueDate: Date.now() - 10000, // due now
-      interval: 1,
-      repetitions: 1,
-      easeFactor: 2.5,
-      state: 'review',
-      history: [],
-    },
-    {
-      id: 'card-2',
-      type: 'sentence',
-      frontText: 'Whenever you 【feel like】 criticizing anyone, just remember that all the people in this world haven’t had the advantages that you’ve had.',
-      contextSentence: 'Expressão em foco: feel like (sentir vontade de)',
-      backTranslation: 'Sempre que você sentir vontade de criticar alguém, apenas lembre-se de que nem todas as pessoas neste mundo tiveram as vantagens que você teve.',
-      phonetic: '/fiːl laɪk/',
-      notes: 'Expressão: FEEL LIKE + ING = "sentir vontade de fazer algo" • The Great Gatsby',
-      audiobookTitle: 'The Great Gatsby',
-      dateAdded: Date.now() - 2 * 86400000,
-      dueDate: Date.now() - 5000,
-      interval: 1,
-      repetitions: 0,
-      easeFactor: 2.5,
-      state: 'new',
-      history: [],
-    },
-    {
-      id: 'card-3',
-      type: 'sentence',
-      frontText: 'You can’t connect the dots looking forward; you can only connect them looking 【backward】.',
-      contextSentence: 'Palavra em foco: backward (/ˈbæk.wɚd/)',
-      backTranslation: 'Você não consegue ligar os pontos olhando para frente; você só consegue ligá-los olhando para trás.',
-      phonetic: '/ˈbæk.wɚd/',
-      notes: 'Palavra chave: BACKWARD = "para trás, em retrospectiva" • Steve Jobs Stanford Speech',
-      audiobookTitle: 'Stay Hungry, Stay Foolish',
-      dateAdded: Date.now() - 86400000,
-      dueDate: Date.now() - 2000,
-      interval: 1,
-      repetitions: 0,
-      easeFactor: 2.5,
-      state: 'new',
-      history: [],
-    },
-  ];
-
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(initialDeck));
-  return initialDeck;
+  return [];
 }
 
 export function saveFlashcardsToStorage(cards: SRSFlashcard[]) {

@@ -17,7 +17,7 @@ import { audioEngine } from '../utils/audioEngine';
 import confetti from 'canvas-confetti';
 
 interface SpeakingLabProps {
-  currentAudiobook: Audiobook;
+  currentAudiobook: Audiobook | null;
   initialSentence?: string;
   onRecordAttempt?: () => void;
 }
@@ -28,7 +28,7 @@ export const SpeakingLab: React.FC<SpeakingLabProps> = ({
   onRecordAttempt,
 }) => {
   const [selectedSentenceText, setSelectedSentenceText] = useState<string>(
-    initialSentence || currentAudiobook.sentences[0]?.text || ''
+    initialSentence || currentAudiobook?.sentences?.[0]?.text || ''
   );
   const [isRecording, setIsRecording] = useState(false);
   const [userAudioUrl, setUserAudioUrl] = useState<string | null>(null);
@@ -45,8 +45,10 @@ export const SpeakingLab: React.FC<SpeakingLabProps> = ({
       setSelectedSentenceText(initialSentence);
       setEvaluation(null);
       setUserAudioUrl(null);
+    } else if (currentAudiobook?.sentences?.[0]?.text && !selectedSentenceText) {
+      setSelectedSentenceText(currentAudiobook.sentences[0].text);
     }
-  }, [initialSentence]);
+  }, [initialSentence, currentAudiobook]);
 
   // Clean up audio blob URL on unmount
   useEffect(() => {
@@ -168,6 +170,20 @@ export const SpeakingLab: React.FC<SpeakingLabProps> = ({
       audio.play();
     }
   };
+
+  if (!currentAudiobook || !currentAudiobook.sentences || currentAudiobook.sentences.length === 0) {
+    return (
+      <div className="max-w-xl mx-auto px-6 py-20 text-center space-y-4 text-slate-100">
+        <div className="w-16 h-16 rounded-2xl bg-emerald-950/60 border border-emerald-800/40 flex items-center justify-center text-emerald-400 mx-auto shadow-xl">
+          <Mic className="w-8 h-8" />
+        </div>
+        <h3 className="text-xl font-bold text-white">Nenhum audiolivro carregado</h3>
+        <p className="text-xs text-slate-400 leading-relaxed max-w-md mx-auto">
+          Para praticar speaking e shadowing com avaliação fonética em tempo real, escolha ou importe um audiolivro na Galeria de Mídias.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-8 space-y-8 text-slate-100">

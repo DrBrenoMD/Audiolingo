@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import path from 'path';
+import { GoogleGenAI } from '@google/genai';
 
 dotenv.config();
 
@@ -16,8 +17,20 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 const translationCache = new Map<string, string>();
 const dictionaryCache = new Map<string, any>();
 
+// Initialize Gemini Client
+let geminiClient: GoogleGenAI | null = null;
+function getGemini(): GoogleGenAI | null {
+  if (process.env.GEMINI_API_KEY) {
+    if (!geminiClient) {
+      geminiClient = new GoogleGenAI();
+    }
+    return geminiClient;
+  }
+  return null;
+}
+
 // ==========================================
-// 1. Traditional Helper: MyMemory Translation API (Zero AI)
+// 1. Traditional Helper: MyMemory Translation API
 // ==========================================
 async function translateText(text: string, from = 'en', to = 'pt-BR'): Promise<string> {
   const clean = text.trim();
@@ -41,6 +54,67 @@ async function translateText(text: string, from = 'en', to = 'pt-BR'): Promise<s
     console.warn('MyMemory translation error:', err);
   }
   return clean;
+}
+
+// ==========================================
+// 2. Multimodal Speech-to-Text: Gemini API (Native High-Accuracy Transcription & Alignment)
+// ==========================================
+interface AudioTranscriptionData {
+  transcript: string;
+  translationPt: string;
+  words?: Array<{ word: string; start: number; end: number }>;
+}
+
+async function transcribeAudioWithGemini(
+  audioBuffer: Buffer,
+  mimeType: string = 'audio/wav',
+  durationSec: number = 20
+): Promise<AudioTranscriptionData | null> {
+  const ai = getGemini();
+  if (!ai) return null;
+
+  try {
+    const prompt = `You are a speech transcription engine for an English audiobook learning app.
+Transcribe the spoken English in this audio verbatim.
+Return a valid JSON object matching this schema:
+{
+  "transcript": "Exact spoken English text",
+  "translationPt": "Natural Brazilian Portuguese translation",
+  "words": [
+    { "word": "word", "start": 0.0, "end": 0.5 }
+  ]
+}
+Where start and end are relative time offsets in seconds from 0.0 to ${Math.max(1, durationSec).toFixed(1)}s.
+If the audio has no human speech (only silence, tone, or background noise), return:
+{ "transcript": "", "translationPt": "", "words": [] }`;
+
+    const res = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [
+        {
+          inlineData: {
+            mimeType: mimeType || 'audio/wav',
+            data: audioBuffer.toString('base64'),
+          },
+        },
+        { text: prompt },
+      ],
+      config: {
+        responseMimeType: 'application/json',
+      },
+    });
+
+    if (res.text) {
+      const parsed = JSON.parse(res.text);
+      const transcript = typeof parsed.transcript === 'string' ? parsed.transcript.trim() : '';
+      const translationPt = typeof parsed.translationPt === 'string' ? parsed.translationPt.trim() : '';
+      const words = Array.isArray(parsed.words) ? parsed.words : [];
+      return { transcript, translationPt, words };
+    }
+  } catch (err: any) {
+    console.warn('Gemini audio transcription warning:', err?.message || err);
+  }
+  return null;
 }
 
 // ==========================================
@@ -90,6 +164,9 @@ async function transcribeAudioWithWhisper(audioBuffer: Buffer, mimeType: string 
 // ==========================================
 // 3. Traditional Audio Chunk Transcription (/api/transcribe-chunk)
 // ==========================================
+// ==========================================
+// 3. Audio Chunk Transcription (/api/transcribe-chunk)
+// ==========================================
 app.post('/api/transcribe-chunk', async (req, res) => {
   try {
     const { audioChunkBase64, mimeType = 'audio/wav', startOffset = 0, duration = 20 } = req.body;
@@ -100,49 +177,73 @@ app.post('/api/transcribe-chunk', async (req, res) => {
 
     const audioBuffer = Buffer.from(audioChunkBase64, 'base64');
     let rawTranscript = '';
-    let whisperWords: Array<{ word: string; start: number; end: number }> | null = null;
+    let ptTranslation = '';
+    let timedWords: Array<{ word: string; start: number; end: number }> = [];
+    let engineUsed = 'none';
 
-    // Call traditional Whisper ASR if key is present
+    // 1. Primary: Transcribe with Gemini API (supports speech recognition & word boundaries)
     try {
-      const whisperResult = await transcribeAudioWithWhisper(audioBuffer, mimeType);
-      if (whisperResult && whisperResult.text) {
-        rawTranscript = whisperResult.text.trim();
-        if (Array.isArray(whisperResult.words) && whisperResult.words.length > 0) {
-          whisperWords = whisperResult.words;
+      const geminiResult = await transcribeAudioWithGemini(audioBuffer, mimeType, Number(duration));
+      if (geminiResult && geminiResult.transcript) {
+        rawTranscript = geminiResult.transcript.trim();
+        ptTranslation = geminiResult.translationPt?.trim() || '';
+        if (Array.isArray(geminiResult.words) && geminiResult.words.length > 0) {
+          timedWords = geminiResult.words;
         }
+        engineUsed = 'gemini-speech-to-text';
       }
     } catch (err) {
-      console.warn('Whisper ASR call failed:', err);
+      console.warn('Gemini chunk transcribe error:', err);
     }
 
-    // If no Whisper key is set, produce a clean timed listening placeholder
+    // 2. Secondary fallback: Whisper ASR if Groq/OpenAI key configured
     if (!rawTranscript) {
-      const startMin = Math.floor(startOffset / 60);
-      const startSec = Math.floor(startOffset % 60);
-      const endMin = Math.floor((startOffset + duration) / 60);
-      const endSec = Math.floor((startOffset + duration) % 60);
-      const timeTag = `${startMin}:${startSec.toString().padStart(2, '0')} - ${endMin}:${endSec.toString().padStart(2, '0')}`;
-
-      rawTranscript = `Audio playback segment [${timeTag}]. Configure GROQ_API_KEY for automatic speech-to-text.`;
+      try {
+        const whisperResult = await transcribeAudioWithWhisper(audioBuffer, mimeType);
+        if (whisperResult && whisperResult.text) {
+          rawTranscript = whisperResult.text.trim();
+          if (Array.isArray(whisperResult.words) && whisperResult.words.length > 0) {
+            timedWords = whisperResult.words;
+          }
+          engineUsed = 'whisper-asr';
+        }
+      } catch (err) {
+        console.warn('Whisper ASR fallback error:', err);
+      }
     }
 
-    // Translate to Portuguese using traditional MyMemory API
-    const ptTranslation = await translateText(rawTranscript);
+    // 3. If no recognizable speech was spoken (e.g. music or silence), return empty sentences cleanly
+    if (!rawTranscript || rawTranscript.length === 0) {
+      return res.json({
+        sentences: [],
+        engine: engineUsed,
+        notice: 'No human speech detected in this audio segment',
+      });
+    }
 
-    // Compute word cues from Whisper acoustic timestamps or linear distribution
+    // Translate to Portuguese if not already translated by Gemini
+    if (!ptTranslation) {
+      ptTranslation = await translateText(rawTranscript);
+    }
+
+    // Compute word cues from timestamps
     let finalWords: Array<{ word: string; cleanWord: string; start: number; end: number; index: number }> = [];
 
-    if (whisperWords && whisperWords.length > 0) {
-      finalWords = whisperWords.map((w, wi) => ({
-        word: w.word.trim(),
-        cleanWord: w.word.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
-        start: +(Number(startOffset) + (w.start || 0)).toFixed(2),
-        end: +(Number(startOffset) + (w.end || 0)).toFixed(2),
-        index: wi,
-      }));
+    if (timedWords.length > 0) {
+      finalWords = timedWords.map((w, wi) => {
+        const wordStart = +(Number(startOffset) + Math.max(0, Number(w.start || 0))).toFixed(2);
+        const wordEnd = +(Number(startOffset) + Math.min(Number(duration), Math.max(Number(w.start || 0) + 0.1, Number(w.end || 0)))).toFixed(2);
+        return {
+          word: w.word.trim(),
+          cleanWord: w.word.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+          start: wordStart,
+          end: wordEnd,
+          index: wi,
+        };
+      });
     } else {
       const rawWords = rawTranscript.split(/\s+/).filter(Boolean);
-      const wordDur = duration / Math.max(1, rawWords.length);
+      const wordDur = Number(duration) / Math.max(1, rawWords.length);
       finalWords = rawWords.map((w, wi) => ({
         word: w,
         cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
@@ -156,13 +257,13 @@ app.post('/api/transcribe-chunk', async (req, res) => {
       id: `s-${Math.round(startOffset)}`,
       index: 0,
       start: +Number(startOffset).toFixed(2),
-      end: +Number(startOffset + duration).toFixed(2),
+      end: +Number(Number(startOffset) + Number(duration)).toFixed(2),
       text: rawTranscript,
       translationPt: ptTranslation,
       words: finalWords,
     };
 
-    return res.json({ sentences: [sentence], engine: whisperWords ? 'whisper-asr' : 'traditional-aligner' });
+    return res.json({ sentences: [sentence], engine: engineUsed });
   } catch (err: any) {
     console.error('Chunk transcribe error:', err);
     return res.status(500).json({ error: err.message || 'Chunk failed' });
@@ -170,7 +271,7 @@ app.post('/api/transcribe-chunk', async (req, res) => {
 });
 
 // ==========================================
-// 4. Traditional Full Audio / Text Alignment (/api/transcribe-audio)
+// 4. Full Audio / Text Transcription & Alignment (/api/transcribe-audio)
 // ==========================================
 app.post('/api/transcribe-audio', async (req, res) => {
   try {
@@ -178,12 +279,23 @@ app.post('/api/transcribe-audio', async (req, res) => {
 
     let fullText = providedText || '';
 
-    // If audio is provided with a Whisper key, run traditional Whisper ASR
+    // If audio is provided without text, transcribe with Gemini first, then Whisper
     if (audioBase64 && (!fullText || fullText.trim().length === 0)) {
       const audioBuffer = Buffer.from(audioBase64, 'base64');
-      const whisperResult = await transcribeAudioWithWhisper(audioBuffer, mimeType);
-      if (whisperResult && whisperResult.text) {
-        fullText = whisperResult.text;
+      try {
+        const geminiResult = await transcribeAudioWithGemini(audioBuffer, mimeType, 60);
+        if (geminiResult && geminiResult.transcript) {
+          fullText = geminiResult.transcript;
+        }
+      } catch (e) {
+        console.warn('Gemini full audio transcribe notice:', e);
+      }
+
+      if (!fullText) {
+        const whisperResult = await transcribeAudioWithWhisper(audioBuffer, mimeType);
+        if (whisperResult && whisperResult.text) {
+          fullText = whisperResult.text;
+        }
       }
     }
 
@@ -191,7 +303,7 @@ app.post('/api/transcribe-audio', async (req, res) => {
       fullText = 'Chapter audio loaded. Tap play to start listening and studying.';
     }
 
-    // Traditional sentence segmentation using regex boundaries
+    // Sentence segmentation using natural boundaries
     const rawSentences = fullText
       .split(/(?<=[.?!])\s+/)
       .map((s: string) => s.trim())
@@ -229,7 +341,7 @@ app.post('/api/transcribe-audio', async (req, res) => {
 
     return res.json({
       title,
-      summaryPt: 'Audiolivro importado e segmentado via algoritmo tradicional de alinhamento.',
+      summaryPt: 'Audiolivro importado e transcrito com inteligência artificial.',
       level: 'Intermediate',
       totalDurationEstimate: totalDuration,
       sentences,

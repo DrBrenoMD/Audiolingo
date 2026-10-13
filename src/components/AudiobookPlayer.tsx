@@ -33,12 +33,13 @@ import { SidePanel, SidePanelMode } from './SidePanel';
 import confetti from 'canvas-confetti';
 
 interface AudiobookPlayerProps {
-  audiobook: Audiobook;
+  audiobook: Audiobook | null;
   onSaveToSRS: (card: Partial<SRSFlashcard>) => void;
   onNavigateToSpeaking: (sentenceText: string) => void;
   onSelectAudiobook: (book: Audiobook) => void;
   allAudiobooks: Audiobook[];
   onAudiobookCreated: (newBook: Audiobook) => void;
+  onUpdateAudiobook?: (updated: Audiobook) => void;
   onOpenMediaGallery?: () => void;
 }
 
@@ -49,6 +50,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   onSelectAudiobook,
   allAudiobooks,
   onAudiobookCreated,
+  onUpdateAudiobook,
   onOpenMediaGallery,
 }) => {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -63,11 +65,12 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   // Progressive JIT Transcription State
   const [autoTranscribeActive, setAutoTranscribeActive] = useState<boolean>(true);
   const [batchTranscribing, setBatchTranscribing] = useState<boolean>(false);
+  const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
   const [transcribingSlices, setTranscribingSlices] = useState<Set<number>>(new Set());
 
   // Dynamic sentence store allowing progressive updates to the current chapter
   const [currentChapterIdx, setCurrentChapterIdx] = useState<number>(
-    audiobook.currentChapterIndex || 0
+    audiobook?.currentChapterIndex || 0
   );
   const [dynamicSentences, setDynamicSentences] = useState<Sentence[]>([]);
 
@@ -83,11 +86,12 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const playTimerRef = useRef<number | null>(null);
 
-  const currentChapter: Chapter | undefined = audiobook.chapters?.[currentChapterIdx];
-  const activeAudioSrc: string = currentChapter?.audioUrl || audiobook.audioUrl || '';
+  const currentChapter: Chapter | undefined = audiobook?.chapters?.[currentChapterIdx];
+  const activeAudioSrc: string = currentChapter?.audioUrl || audiobook?.audioUrl || '';
 
   // Synchronize sentences when chapter or audiobook changes
   useEffect(() => {
+    if (!audiobook) return;
     setCurrentChapterIdx(audiobook.currentChapterIndex || 0);
     setCurrentTime(0);
     setRealDuration(0);
@@ -105,7 +109,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     if (activeAudioSrc && sanitized.some((s) => isPlaceholderSentence(s))) {
       transcribeSliceAtTime(0);
     }
-  }, [audiobook.id, currentChapterIdx, activeAudioSrc]);
+  }, [audiobook?.id, currentChapterIdx, activeAudioSrc]);
 
   // Synchronize playback speed with audio element
   useEffect(() => {
@@ -118,7 +122,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   const displayDuration =
     realDuration > 0
       ? realDuration
-      : currentChapter?.duration || audiobook.duration || 60;
+      : currentChapter?.duration || audiobook?.duration || 60;
 
   // Active sentence & word
   const activeSentenceIndex = dynamicSentences.findIndex(
@@ -153,11 +157,25 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
       const newSentences = await chunkTranscriber.transcribeSlice(activeAudioSrc, sliceStartSec, 20);
       if (newSentences && newSentences.length > 0) {
         setDynamicSentences((prev) => {
-          // Filter out placeholder chunks in this time window and replace with real transcription
-          const filtered = prev.filter(
-            (s) => !(s.start >= sliceStartSec - 0.5 && s.end <= sliceStartSec + 20.5 && isPlaceholderSentence(s))
-          );
+          // Filter out any placeholder chunks that overlap with this 20s slice window
+          const filtered = prev.filter((s) => {
+            const overlaps = Math.max(s.start, sliceStartSec - 0.5) < Math.min(s.end, sliceStartSec + 20.5);
+            return !(overlaps && isPlaceholderSentence(s));
+          });
           const merged = [...filtered, ...newSentences].sort((a, b) => a.start - b.start);
+
+          // Auto-persist transcription to audiobook state and localStorage
+          if (onUpdateAudiobook && audiobook) {
+            const updatedBook: Audiobook = {
+              ...audiobook,
+              sentences: merged,
+              chapters: audiobook.chapters?.map((ch, idx) =>
+                idx === currentChapterIdx ? { ...ch, sentences: merged } : ch
+              ),
+            };
+            onUpdateAudiobook(updatedBook);
+          }
+
           return merged;
         });
       }
@@ -186,8 +204,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
       slicesToPrefetch.forEach((sliceStart) => {
         const isPlaceholder = dynamicSentences.some(
           (s) =>
-            s.start >= sliceStart - 0.5 &&
-            s.end <= sliceStart + 20.5 &&
+            Math.max(s.start, sliceStart - 0.5) < Math.min(s.end, sliceStart + 20.5) &&
             isPlaceholderSentence(s)
         );
 
@@ -198,19 +215,23 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     }
   }, [isPlaying, autoTranscribeActive, Math.floor(currentTime / 6), activeAudioSrc, displayDuration, dynamicSentences.length]);
 
-  // Transcribe whole chapter in the background sequentially
+  // Transcribe whole chapter in the background with live progress tracking
   const handleTranscribeWholeChapterInBackground = async () => {
     if (!activeAudioSrc || batchTranscribing) return;
     setBatchTranscribing(true);
     try {
       const totalDur = displayDuration;
       const slicesCount = Math.ceil(totalDur / 20);
+      setBatchProgress({ current: 0, total: slicesCount });
+
       for (let i = 0; i < slicesCount; i++) {
         const start = i * 20;
         await transcribeSliceAtTime(start);
+        setBatchProgress({ current: i + 1, total: slicesCount });
       }
     } finally {
       setBatchTranscribing(false);
+      setBatchProgress(null);
     }
   };
 
@@ -251,7 +272,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   };
 
   const switchChapter = (index: number) => {
-    if (index >= 0 && audiobook.chapters && index < audiobook.chapters.length) {
+    if (index >= 0 && audiobook?.chapters && index < audiobook.chapters.length) {
       setCurrentChapterIdx(index);
       setCurrentTime(0);
       setRealDuration(0);
@@ -281,10 +302,10 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
       type: 'sentence',
       frontText: sentence.text,
       backTranslation: sentence.translationPt,
-      notes: `Audiolivro: ${audiobook.title} ${
+      notes: `Audiolivro: ${audiobook?.title || 'Audiolivro'} ${
         currentChapter ? `• ${currentChapter.title}` : ''
       }`,
-      audiobookTitle: audiobook.title,
+      audiobookTitle: audiobook?.title || 'Audiolivro',
     });
     setSavedSentenceId(sentence.id);
     confetti({
@@ -311,6 +332,27 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     const s = Math.floor(secs % 60);
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
+
+  if (!audiobook) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center p-8 bg-slate-950 text-slate-100 text-center">
+        <div className="w-16 h-16 rounded-2xl bg-indigo-950/80 border border-indigo-800/40 flex items-center justify-center text-indigo-400 mb-4 shadow-xl shadow-indigo-950/40">
+          <BookOpen className="w-8 h-8" />
+        </div>
+        <h2 className="text-xl font-bold text-white mb-2">Nenhum audiolivro selecionado</h2>
+        <p className="text-xs text-slate-400 max-w-md mb-6 leading-relaxed">
+          Escolha uma obra na sua Galeria de Mídias ou adicione um novo audiolivro com áudio e texto para começar seus estudos.
+        </p>
+        <button
+          onClick={onOpenMediaGallery}
+          className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-indigo-950/50 transition"
+        >
+          <FolderOpen className="w-4 h-4" />
+          <span>Abrir Galeria de Mídias</span>
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full bg-slate-950 text-slate-100 relative">
@@ -401,7 +443,9 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
               {batchTranscribing ? (
                 <>
                   <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
-                  <span>Transcrevendo...</span>
+                  <span>
+                    Transcrevendo ({batchProgress ? `${batchProgress.current}/${batchProgress.total}` : 'iniciando...'})
+                  </span>
                 </>
               ) : (
                 <>
@@ -718,12 +762,10 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                       </span>
                     ) : isPlaceholder ? (
                       <span className="text-slate-400 font-sans text-sm italic flex items-center justify-between py-1">
-                        <span className="flex items-center gap-2 text-indigo-300/80">
+                        <span className="flex items-center gap-2 text-indigo-300/90">
                           <Radio className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
                           <span>
-                            {sentence.text.startsWith('Audiobook narration segment')
-                              ? `Trecho de áudio (${formatTime(sentence.start)} - ${formatTime(sentence.end)}) • Aguardando transcrição automática...`
-                              : sentence.text}
+                            {`Áudio do capítulo (${formatTime(sentence.start)} - ${formatTime(sentence.end)}) • Transcrição em andamento...`}
                           </span>
                         </span>
                       </span>
