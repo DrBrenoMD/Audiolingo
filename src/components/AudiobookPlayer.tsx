@@ -24,6 +24,10 @@ import {
   Loader2,
   Wand2,
   AlertTriangle,
+  Subtitles,
+  Upload,
+  Edit3,
+  X,
 } from 'lucide-react';
 import { Audiobook, Sentence, WordCue, SRSFlashcard, Chapter } from '../types';
 import { audioEngine } from '../utils/audioEngine';
@@ -31,6 +35,7 @@ import { chunkTranscriber } from '../utils/chunkAudioTranscriber';
 import { liveTranscriber } from '../utils/liveTranscription';
 import { adjustSentenceSync, snapSentenceToCurrentTime, isPlaceholderSentence } from '../utils/fuzzyAligner';
 import { SidePanel, SidePanelMode } from './SidePanel';
+import { SubtitleSyncModal } from './SubtitleSyncModal';
 import confetti from 'canvas-confetti';
 
 interface AudiobookPlayerProps {
@@ -69,6 +74,10 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
   const [transcribingSlices, setTranscribingSlices] = useState<Set<number>>(new Set());
   const [isWebSpeechActive, setIsWebSpeechActive] = useState<boolean>(false);
+  const [interimSpeechText, setInterimSpeechText] = useState<string>('');
+  const [showSubtitleModal, setShowSubtitleModal] = useState<boolean>(false);
+  const [editingSentence, setEditingSentence] = useState<Sentence | null>(null);
+  const [editSentenceText, setEditSentenceText] = useState<string>('');
 
   // Dynamic sentence store allowing progressive updates to the current chapter
   const [currentChapterIdx, setCurrentChapterIdx] = useState<number>(
@@ -228,7 +237,13 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   const toggleWebSpeech = () => {
     if (!isWebSpeechActive) {
       liveTranscriber.startListening((text, isFinal) => {
+        if (!isFinal) {
+          setInterimSpeechText(text);
+          return;
+        }
+
         if (isFinal && text.trim().length > 0) {
+          setInterimSpeechText('');
           const startTime = Math.max(0, currentTime - 3.5);
           const endTime = Math.max(startTime + 1.0, currentTime);
           const newSentence = liveTranscriber.createSentenceFromSpeech(
@@ -260,6 +275,9 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                   onUpdateAudiobook({
                     ...audiobook,
                     sentences: merged,
+                    chapters: audiobook.chapters?.map((ch, idx) =>
+                      idx === currentChapterIdx ? { ...ch, sentences: merged } : ch
+                    ),
                   });
                 }
                 return merged;
@@ -282,7 +300,83 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     } else {
       liveTranscriber.stopListening();
       setIsWebSpeechActive(false);
+      setInterimSpeechText('');
     }
+  };
+
+  // Synchronize new sentences from Subtitle (.srt) or Text Aligner
+  const handleSentencesAligned = (newSentences: Sentence[]) => {
+    setDynamicSentences(newSentences);
+    if (onUpdateAudiobook && audiobook) {
+      const updatedBook: Audiobook = {
+        ...audiobook,
+        sentences: newSentences,
+        chapters: audiobook.chapters?.map((ch, idx) =>
+          idx === currentChapterIdx ? { ...ch, sentences: newSentences } : ch
+        ),
+      };
+      onUpdateAudiobook(updatedBook);
+    }
+  };
+
+  // Single sentence manual text editing
+  const handleStartEditSentence = (sentence: Sentence) => {
+    setEditingSentence(sentence);
+    setEditSentenceText(isPlaceholderSentence(sentence) ? '' : sentence.text);
+  };
+
+  const handleSaveSentenceEdit = () => {
+    if (!editingSentence) return;
+    const clean = editSentenceText.trim();
+    if (!clean) return;
+
+    const rawWords = clean.split(/\s+/).filter(Boolean);
+    const dur = Math.max(0.5, editingSentence.end - editingSentence.start);
+    const wordDur = dur / Math.max(1, rawWords.length);
+
+    const updated: Sentence = {
+      ...editingSentence,
+      text: clean,
+      id: `edited-${Date.now()}`,
+      words: rawWords.map((w, wIdx) => ({
+        word: w,
+        cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+        start: +(editingSentence.start + wIdx * wordDur).toFixed(2),
+        end: +(editingSentence.start + (wIdx + 1) * wordDur).toFixed(2),
+        index: wIdx,
+      })),
+    };
+
+    // Fast translate to Portuguese
+    fetch('/api/fast-translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: clean }),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.translatedText) updated.translationPt = d.translatedText;
+        applySentenceEdit(updated);
+      })
+      .catch(() => applySentenceEdit(updated));
+
+    setEditingSentence(null);
+  };
+
+  const applySentenceEdit = (updated: Sentence) => {
+    setDynamicSentences((prev) => {
+      const next = prev.map((s) => (s.id === editingSentence?.id || s.index === editingSentence?.index ? updated : s));
+      if (onUpdateAudiobook && audiobook) {
+        onUpdateAudiobook({
+          ...audiobook,
+          sentences: next,
+          chapters: audiobook.chapters?.map((ch, idx) =>
+            idx === currentChapterIdx ? { ...ch, sentences: next } : ch
+          ),
+        });
+      }
+      return next;
+    });
   };
 
   // Play / Pause toggle
@@ -482,6 +576,16 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
             </button>
           )}
 
+          {/* Subtitle / Book Text Sync Button (Zero AI) */}
+          <button
+            onClick={() => setShowSubtitleModal(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border-indigo-500/40 transition shadow-sm"
+            title="Sincronizar legendas (.srt/.vtt) ou texto do livro para este capítulo (Zero IA)"
+          >
+            <Subtitles className="w-3.5 h-3.5 text-indigo-400" />
+            <span>Sincronizar Legenda/Texto</span>
+          </button>
+
           {/* Native Web Speech Recognition (Zero AI) */}
           {liveTranscriber.isSupported() && (
             <button
@@ -623,35 +727,58 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
           className="flex-1 overflow-y-auto px-6 pt-6 pb-32 space-y-6 max-w-4xl mx-auto w-full custom-scrollbar"
         >
           {/* Vercel 404 Diagnostics Banner */}
-          {chunkTranscriber.has404Error && (
-            <div className="p-4 rounded-xl bg-amber-950/50 border border-amber-600/60 text-xs text-amber-200 space-y-2">
-              <div className="font-bold flex items-center gap-2 text-amber-300 text-sm">
-                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-                <span>Configuração de Backend no Vercel Necessária</span>
-              </div>
-              <p className="text-amber-200/90 leading-relaxed">
-                A rota <code className="bg-amber-900/60 px-1 py-0.5 rounded font-mono text-amber-100">/api/transcribe-chunk</code> retornou <strong>404</strong> no seu domínio da Vercel (<code className="font-mono text-amber-100">audiolingo-nu.vercel.app</code>).
-              </p>
-              <div className="bg-slate-900/60 p-2.5 rounded-lg border border-amber-800/40 text-[11px] space-y-1">
-                <p className="font-semibold text-white">Como resolver no seu Vercel:</p>
-                <p>1. O arquivo <code className="text-indigo-300 font-mono">vercel.json</code> e a rota serverless <code className="text-indigo-300 font-mono">api/index.ts</code> estão configurados no repositório.</p>
-                <p>2. Para transcrição Whisper ASR ultra-rápida, você pode adicionar <code className="text-indigo-300 font-mono">GROQ_API_KEY</code> em <strong>Settings → Environment Variables</strong> na Vercel.</p>
-                <p>3. Faça um novo <strong>Deploy</strong> (ou commit/push) para a Vercel compilar o backend serverless.</p>
+          {/* Has Placeholders Sync Card */}
+          {dynamicSentences.some((s) => isPlaceholderSentence(s)) && (
+            <div className="p-4 rounded-2xl bg-gradient-to-r from-indigo-950/80 via-slate-900/90 to-purple-950/80 border border-indigo-500/50 shadow-xl space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-start gap-3">
+                  <div className="p-2.5 rounded-xl bg-indigo-600/20 text-indigo-400 border border-indigo-500/40 shrink-0">
+                    <Subtitles className="w-5 h-5 text-indigo-400" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-white text-sm">
+                      Áudio carregado ({formatTime(displayDuration)}) sem legenda ou texto sincronizado
+                    </h3>
+                    <p className="text-slate-300 text-xs mt-1 leading-relaxed">
+                      Para transformar este áudio em um estudo interativo palavra por palavra (100% Sem IA), sincronize o arquivo de legenda (<span className="text-indigo-300 font-mono">.srt/.vtt</span>) ou o texto original do livro, ou ative o reconhecimento de voz nativo.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                  <button
+                    onClick={() => setShowSubtitleModal(true)}
+                    className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold rounded-xl shadow-lg transition flex items-center gap-2 text-xs"
+                  >
+                    <Upload className="w-4 h-4" />
+                    <span>Sincronizar Legenda (.srt) ou Texto</span>
+                  </button>
+                </div>
               </div>
             </div>
           )}
 
-          {/* Prompt Banner */}
-          <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800/80 text-xs text-slate-400 flex items-start justify-between gap-4">
-            <div className="flex items-start gap-2">
-              <HelpCircle className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
-              <div>
-                <span className="font-semibold text-slate-300">Transcrição Ágil em Chunks: </span>
-                O áudio toca imediatamente com duração real ({formatTime(displayDuration)}).
-                Conforme você ouve, cada trecho de 20s é fatiado e transcrito automaticamente em segundo plano.
+          {/* Live Web Speech Recognition Feedback Banner */}
+          {isWebSpeechActive && (
+            <div className="p-4 rounded-xl bg-emerald-950/70 border border-emerald-500/60 shadow-lg text-xs text-emerald-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-pulse">
+              <div className="flex items-center gap-2.5">
+                <Mic className="w-4 h-4 text-emerald-400 shrink-0 animate-bounce" />
+                <div>
+                  <span className="font-bold text-emerald-100">Web Speech Nativo Ativo: </span>
+                  <span className="text-emerald-300">
+                    {interimSpeechText
+                      ? `"${interimSpeechText}"`
+                      : 'Escutando pelo microfone do navegador... Conforme a fala é reconhecida, as frases são sincronizadas e traduzidas.'}
+                  </span>
+                </div>
               </div>
+              <button
+                onClick={toggleWebSpeech}
+                className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg border border-slate-700 text-xs transition"
+              >
+                Pausar Reconhecimento
+              </button>
             </div>
-          </div>
+          )}
 
           {/* Sentences / Timeframes List */}
           <div className="space-y-6">
@@ -788,14 +915,37 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                     }`}
                   >
                     {isPlaceholder ? (
-                      <span className="text-slate-400 font-sans text-sm italic flex items-center justify-between py-1">
-                        <span className="flex items-center gap-2 text-indigo-300/90">
-                          <Radio className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
-                          <span>
-                            {`Áudio do capítulo (${formatTime(sentence.start)} - ${formatTime(sentence.end)}) • Reproduza o áudio ou ative a Web Speech API para reconhecer a fala nativamente`}
-                          </span>
-                        </span>
-                      </span>
+                      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 py-1 font-sans not-italic">
+                        <div className="flex items-center gap-2.5 text-slate-300">
+                          <Radio className="w-4 h-4 text-amber-400 animate-pulse shrink-0" />
+                          <div>
+                            <span className="font-semibold text-sm text-slate-200">
+                              Trecho de Áudio [{formatTime(sentence.start)} - {formatTime(sentence.end)}]
+                            </span>
+                            <span className="text-xs text-slate-400 ml-2">
+                              • Aguardando legenda sincronizada ou reconhecimento de fala
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            onClick={() => handleStartEditSentence(sentence)}
+                            className="flex items-center gap-1 px-2.5 py-1 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg border border-slate-700 transition"
+                            title="Digitar ou colar texto em inglês para este trecho"
+                          >
+                            <Edit3 className="w-3 h-3 text-indigo-400" />
+                            <span>Digitar Texto</span>
+                          </button>
+                          <button
+                            onClick={() => setShowSubtitleModal(true)}
+                            className="flex items-center gap-1 px-2.5 py-1 text-xs bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-800/60 text-indigo-300 hover:text-white rounded-lg transition"
+                            title="Sincronizar arquivo .srt ou livro completo"
+                          >
+                            <Upload className="w-3 h-3 text-indigo-400" />
+                            <span>Carregar .SRT</span>
+                          </button>
+                        </div>
+                      </div>
                     ) : sentence.words && sentence.words.length > 0 ? (
                       sentence.words.map((cue, wIdx) => {
                         const isWordActive =
@@ -1000,6 +1150,71 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Subtitle & Text Synchronizer Modal (Zero AI) */}
+      <SubtitleSyncModal
+        isOpen={showSubtitleModal}
+        onClose={() => setShowSubtitleModal(false)}
+        audioDuration={displayDuration}
+        chapterTitle={currentChapter?.title || audiobook.title}
+        onSentencesAligned={handleSentencesAligned}
+      />
+
+      {/* Quick Sentence Text Editor Modal */}
+      {editingSentence && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Edit3 className="w-4 h-4 text-indigo-400" />
+                <h3 className="font-bold text-white text-sm">
+                  Editar Texto do Trecho [{formatTime(editingSentence.start)} - {formatTime(editingSentence.end)}]
+                </h3>
+              </div>
+              <button
+                onClick={() => setEditingSentence(null)}
+                className="text-slate-400 hover:text-white p-1 rounded"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div>
+              <label className="block text-xs text-slate-300 font-medium mb-1">
+                Texto em inglês deste trecho:
+              </label>
+              <textarea
+                value={editSentenceText}
+                onChange={(e) => setEditSentenceText(e.target.value)}
+                placeholder="Digite ou cole o que foi falado neste trecho..."
+                rows={3}
+                autoFocus
+                className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl p-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none"
+              />
+              <p className="text-[11px] text-slate-400 mt-1">
+                As palavras serão alinhadas automaticamente neste intervalo e traduzidas para português.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                onClick={() => setEditingSentence(null)}
+                className="px-3 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleSaveSentenceEdit}
+                disabled={!editSentenceText.trim()}
+                className="px-4 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 rounded-lg transition flex items-center gap-1.5"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>Salvar Trecho</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

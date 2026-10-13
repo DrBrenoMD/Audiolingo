@@ -9,9 +9,15 @@ export interface LiveTranscriptCue {
 class LiveTranscriptionService {
   private recognition: any = null;
   private isListening: boolean = false;
+  private shouldBeListening: boolean = false;
+  private restartTimer: any = null;
   private onTranscriptCallback: ((text: string, isFinal: boolean) => void) | null = null;
 
   constructor() {
+    this.initRecognition();
+  }
+
+  private initRecognition() {
     if (typeof window !== 'undefined') {
       const SpeechRecognition =
         (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -44,6 +50,29 @@ class LiveTranscriptionService {
 
         this.recognition.onerror = (e: any) => {
           console.warn('SpeechRecognition notice:', e.error);
+          if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+            this.shouldBeListening = false;
+            this.isListening = false;
+          }
+        };
+
+        this.recognition.onend = () => {
+          this.isListening = false;
+          // Chrome terminates recognition after short silence; auto-restart if user still wants it active
+          if (this.shouldBeListening) {
+            clearTimeout(this.restartTimer);
+            this.restartTimer = setTimeout(() => {
+              if (this.shouldBeListening) {
+                try {
+                  this.recognition.start();
+                  this.isListening = true;
+                } catch (err) {
+                  // If it throws InvalidState, re-init
+                  console.warn('Speech recognition restart caught:', err);
+                }
+              }
+            }, 300);
+          }
         };
       }
     }
@@ -54,18 +83,25 @@ class LiveTranscriptionService {
   }
 
   startListening(callback: (text: string, isFinal: boolean) => void) {
-    if (!this.recognition || this.isListening) return;
+    if (!this.recognition) return;
+    this.shouldBeListening = true;
     this.onTranscriptCallback = callback;
-    try {
-      this.recognition.start();
-      this.isListening = true;
-    } catch (e) {
-      console.warn('Failed to start speech recognition', e);
+
+    if (!this.isListening) {
+      try {
+        this.recognition.start();
+        this.isListening = true;
+      } catch (e) {
+        console.warn('Speech recognition already active or warming up:', e);
+        this.isListening = true;
+      }
     }
   }
 
   stopListening() {
-    if (!this.recognition || !this.isListening) return;
+    this.shouldBeListening = false;
+    clearTimeout(this.restartTimer);
+    if (!this.recognition) return;
     try {
       this.recognition.stop();
     } catch {}

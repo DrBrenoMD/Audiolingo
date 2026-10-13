@@ -18,10 +18,14 @@ export function isPlaceholderSentence(sentence: { text?: string; id?: string } |
     t.startsWith('Audio playback segment') ||
     t.startsWith('Chapter audio:') ||
     t.startsWith('Trecho') ||
+    t.includes('Faixa de áudio') ||
     t.includes('• [') ||
     t.includes('Aguardando transcrição') ||
+    t.includes('Audio narration segment') ||
+    /^\[\d+:\d+\s*-\s*\d+:\d+\]/.test(t) ||
     sentence.id?.startsWith('placeholder-') === true ||
-    sentence.id?.startsWith('chunk-') === true
+    sentence.id?.startsWith('chunk-') === true ||
+    sentence.id?.startsWith('speech-placeholder-') === true
   );
 }
 
