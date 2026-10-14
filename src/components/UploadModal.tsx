@@ -23,6 +23,7 @@ import { Audiobook, Chapter, Sentence } from '../types';
 import { detectAcousticSentences } from '../utils/acousticSilenceDetector';
 import { PhraseLookAheadEngine } from '../utils/phraseLookAheadEngine';
 import { chunkTranscriber } from '../utils/chunkAudioTranscriber';
+import { saveAudioBlob } from '../utils/audioStorage';
 
 interface UploadModalProps {
   isOpen: boolean;
@@ -270,9 +271,16 @@ export const UploadModal: React.FC<UploadModalProps> = ({
       // Build complete Audiobook
       const finalTitle = bookTitle.trim() || 'Audiolivro Multicapítulos';
       const firstChapter = generatedChapters[0];
+      const newBookId = `custom-multi-${Date.now()}`;
+
+      // Persist audio files to IndexedDB so reopening from the Gallery works across reloads!
+      await saveAudioBlob(newBookId, queuedFiles[0].file);
+      for (let chIdx = 0; chIdx < generatedChapters.length; chIdx++) {
+        await saveAudioBlob(generatedChapters[chIdx].id, queuedFiles[chIdx].file);
+      }
 
       const newAudiobook: Audiobook = {
-        id: `custom-multi-${Date.now()}`,
+        id: newBookId,
         title: finalTitle,
         author: author.trim() || 'Coleção de Capítulos',
         coverUrl:

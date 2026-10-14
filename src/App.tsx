@@ -93,20 +93,29 @@ export default function App() {
   useEffect(() => {
     if (selectedAudiobook?.id?.startsWith('custom-')) {
       const bookId = selectedAudiobook.id;
-      getAudioBlobUrl(bookId, selectedAudiobook.audioUrl).then((restoredUrl) => {
-        if (restoredUrl && restoredUrl !== selectedAudiobook.audioUrl) {
-          setSelectedAudiobook((prev) =>
-            prev && prev.id === bookId
-              ? {
-                  ...prev,
-                  audioUrl: restoredUrl,
-                  chapters: prev.chapters?.map((ch, idx) =>
-                    idx === 0 ? { ...ch, audioUrl: restoredUrl } : ch
-                  ),
-                }
-              : prev
+      getAudioBlobUrl(bookId, selectedAudiobook.audioUrl).then(async (restoredUrl) => {
+        let updatedChapters = selectedAudiobook.chapters;
+        if (updatedChapters && updatedChapters.length > 0) {
+          updatedChapters = await Promise.all(
+            updatedChapters.map(async (ch, idx) => {
+              if (idx === 0 && restoredUrl) {
+                return { ...ch, audioUrl: restoredUrl };
+              }
+              const chUrl = await getAudioBlobUrl(ch.id, ch.audioUrl);
+              return chUrl ? { ...ch, audioUrl: chUrl } : ch;
+            })
           );
         }
+
+        setSelectedAudiobook((prev) =>
+          prev && prev.id === bookId
+            ? {
+                ...prev,
+                audioUrl: restoredUrl || prev.audioUrl,
+                chapters: updatedChapters || prev.chapters,
+              }
+            : prev
+        );
       });
     }
   }, [selectedAudiobook?.id]);

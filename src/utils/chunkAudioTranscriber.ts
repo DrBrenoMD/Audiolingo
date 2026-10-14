@@ -9,6 +9,7 @@ export class ChunkAudioTranscriber {
   private activeJobs = new Set<string>();
   public has404Error: boolean = false;
   private warned404: boolean = false;
+  public lastWarning: string | null = null;
 
   /**
    * Decodes an audio blob/file into memory. Cached for fast random slicing.
@@ -85,6 +86,9 @@ export class ChunkAudioTranscriber {
       }
 
       const data = await res.json();
+      if (data.warning) {
+        this.lastWarning = data.warning;
+      }
       const sentences: Sentence[] = data.sentences || [];
 
       if (sentences.length > 0) {

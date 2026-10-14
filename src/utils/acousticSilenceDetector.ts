@@ -225,18 +225,9 @@ export async function detectAcousticSentences(
     for (let i = 0; i < segments.length - 1; i++) {
       const current = segments[i];
       const next = segments[i + 1];
-      if (next.start > current.end) {
-        const gap = next.start - current.end;
-        if (gap < 0.8) {
-          const mid = Number(((current.end + next.start) / 2).toFixed(2));
-          current.end = mid;
-          next.start = mid;
-        }
-      } else if (next.start < current.end) {
-        const mid = Number(((current.end + next.start) / 2).toFixed(2));
-        current.end = mid;
-        next.start = mid;
-      }
+      const mid = Number(((current.end + next.start) / 2).toFixed(2));
+      current.end = mid;
+      next.start = mid;
       current.duration = Number((current.end - current.start).toFixed(2));
       current.index = i;
     }

@@ -189,14 +189,17 @@ export class PhraseLookAheadEngine {
       this.currentPhraseIndex = activeIdx;
     }
 
-    // 2. Determina as 3 próximas frases para antecipação contínua
+    // 2. Determina a frase ativa e as próximas frases para antecipação contínua
     const anticipated: Sentence[] = [];
     if (activeIdx !== -1) {
+      // Prioridade 1: Garante que a frase ATUAL (onde o cursor está ou para onde o usuário avançou/retrocedeu) seja transcrita imediatamente
+      this.triggerAnticipatedProcessing(activeIdx);
+
+      // Prioridade 2: Dispara pré-processamento em segundo plano das frases à frente
       for (let offset = 1; offset <= this.lookAheadWindowSize; offset++) {
         const nextIdx = activeIdx + offset;
         if (nextIdx < this.sentences.length) {
           anticipated.push(this.sentences[nextIdx]);
-          // Dispara pré-processamento em segundo plano das 3 frases à frente
           this.triggerAnticipatedProcessing(nextIdx);
         }
       }

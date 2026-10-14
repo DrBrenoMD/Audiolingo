@@ -32,7 +32,7 @@ import {
 import { Audiobook, Sentence, WordCue, SRSFlashcard, Chapter } from '../types';
 import { audioEngine } from '../utils/audioEngine';
 import { chunkTranscriber } from '../utils/chunkAudioTranscriber';
-import { liveTranscriber } from '../utils/liveTranscription';
+import { getAudioBlobUrl } from '../utils/audioStorage';
 import { adjustSentenceSync, snapSentenceToCurrentTime, isPlaceholderSentence } from '../utils/fuzzyAligner';
 import { detectAcousticSentences, AcousticSegment } from '../utils/acousticSilenceDetector';
 import {
@@ -79,8 +79,6 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   const [batchTranscribing, setBatchTranscribing] = useState<boolean>(false);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
   const [transcribingSlices, setTranscribingSlices] = useState<Set<number>>(new Set());
-  const [isWebSpeechActive, setIsWebSpeechActive] = useState<boolean>(false);
-  const [interimSpeechText, setInterimSpeechText] = useState<string>('');
   const [showSubtitleModal, setShowSubtitleModal] = useState<boolean>(false);
   const [editingSentence, setEditingSentence] = useState<Sentence | null>(null);
   const [editSentenceText, setEditSentenceText] = useState<string>('');
@@ -248,14 +246,13 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     const containerRect = container.getBoundingClientRect();
     const elRect = activeEl.getBoundingClientRect();
 
-    const isTooHigh = elRect.top < containerRect.top + 40;
-    const isTooLow = elRect.bottom > containerRect.bottom - 80;
+    const isTooHigh = elRect.top < containerRect.top + 60;
+    const isTooLow = elRect.bottom > containerRect.bottom - 100;
 
     if (isTooHigh || isTooLow) {
       activeEl.scrollIntoView({
         behavior: 'smooth',
         block: 'nearest',
-        inline: 'nearest',
       });
     }
   }, [activeSentenceIndex, isPlaying]);
@@ -267,7 +264,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     }
   }, [currentTime, dynamicSentences.length]);
 
-  // Transcrição de uma frase individual específica via API de fatias ou Web Speech
+  // Transcrição de uma frase individual específica via Gemini AI
   const transcribeSpecificSentence = async (sentenceIndex: number) => {
     const target = dynamicSentences[sentenceIndex];
     if (!target) return;
@@ -299,160 +296,12 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
             return nextList;
           });
           lookAheadEngineRef.current.updateSentenceTranscript(sentenceIndex, res[0].text.trim());
-          setTargetedTranscribingIndex(null);
-          return;
         }
       }
-
-      // Se não transcrito pelo servidor e Web Speech suportado
-      if (liveTranscriber.isSupported()) {
-        seek(target.start);
-        setIsWebSpeechActive(true);
-        liveTranscriber.startListening((text, isFinal) => {
-          if (!isFinal) {
-            setInterimSpeechText(text);
-            return;
-          }
-
-          if (isFinal && text.trim().length > 0) {
-            setInterimSpeechText('');
-            lookAheadEngineRef.current.updateSentenceTranscript(sentenceIndex, text.trim());
-            setDynamicSentences((prev) => {
-              const current = prev[sentenceIndex];
-              if (!current) return prev;
-              const dur = Math.max(0.6, current.end - current.start);
-              const words = text.trim().split(/\s+/).filter(Boolean);
-              const wordDur = dur / Math.max(1, words.length);
-              const updated: Sentence = {
-                ...current,
-                text: text.trim(),
-                words: words.map((w, wIdx) => ({
-                  word: w,
-                  cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
-                  start: Number((current.start + wIdx * wordDur).toFixed(2)),
-                  end: Number((current.start + (wIdx + 1) * wordDur).toFixed(2)),
-                  index: wIdx,
-                })),
-              };
-
-              fetch('/api/fast-translate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: text.trim() }),
-              })
-                .then((r) => r.json())
-                .then((data) => {
-                  if (data?.translatedText) {
-                    updated.translationPt = data.translatedText;
-                    setDynamicSentences((p) => p.map((s, idx) => (idx === sentenceIndex ? updated : s)));
-                  }
-                })
-                .catch(() => {});
-
-              const nextList = prev.map((s, idx) => (idx === sentenceIndex ? updated : s));
-              if (onUpdateAudiobook && audiobook) {
-                onUpdateAudiobook({
-                  ...audiobook,
-                  sentences: nextList,
-                  chapters: audiobook.chapters?.map((ch, idx) =>
-                    idx === currentChapterIdx ? { ...ch, sentences: nextList } : ch
-                  ),
-                });
-              }
-              return nextList;
-            });
-            setTargetedTranscribingIndex(null);
-          }
-        });
-      }
     } catch (err) {
-      console.warn('Erro ao transcrever frase individual:', err);
+      console.warn('Erro ao transcrever frase individual com Gemini:', err);
     } finally {
-      setTimeout(() => setTargetedTranscribingIndex(null), 1500);
-    }
-  };
-
-  // Stop Web Speech listening on unmount
-  useEffect(() => {
-    return () => {
-      liveTranscriber.stopListening();
-    };
-  }, []);
-
-  // Transcrição Automática Nativa (Web Speech API - Zero IA, Zero Servidores)
-  const startAutoWebSpeech = () => {
-    if (!liveTranscriber.isSupported()) return;
-    setIsWebSpeechActive(true);
-    liveTranscriber.startListening((text, isFinal) => {
-      if (!isFinal) {
-        setInterimSpeechText(text);
-        return;
-      }
-
-      if (isFinal && text.trim().length > 0) {
-        setInterimSpeechText('');
-        const trimmed = text.trim();
-        if (activeSentenceIndex === -1) return;
-        const sIdx = activeSentenceIndex;
-
-        setDynamicSentences((prev) => {
-          const current = prev[sIdx];
-          if (!current) return prev;
-          const dur = Math.max(0.6, current.end - current.start);
-          const words = trimmed.split(/\s+/).filter(Boolean);
-          const wordDur = dur / Math.max(1, words.length);
-          const updated: Sentence = {
-            ...current,
-            text: trimmed,
-            words: words.map((w, wIdx) => ({
-              word: w,
-              cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
-              start: Number((current.start + wIdx * wordDur).toFixed(2)),
-              end: Number((current.start + (wIdx + 1) * wordDur).toFixed(2)),
-              index: wIdx,
-            })),
-          };
-
-          lookAheadEngineRef.current.updateSentenceTranscript(sIdx, trimmed);
-
-          // Tradução rápida sem IA
-          fetch('/api/fast-translate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: trimmed }),
-          })
-            .then((r) => r.json())
-            .then((data) => {
-              if (data?.translatedText) {
-                updated.translationPt = data.translatedText;
-                setDynamicSentences((p) => p.map((s, idx) => (idx === sIdx ? updated : s)));
-              }
-            })
-            .catch(() => {});
-
-          const nextList = prev.map((s, idx) => (idx === sIdx ? updated : s));
-          if (onUpdateAudiobook && audiobook) {
-            onUpdateAudiobook({
-              ...audiobook,
-              sentences: nextList,
-              chapters: audiobook.chapters?.map((ch, idx) =>
-                idx === currentChapterIdx ? { ...ch, sentences: nextList } : ch
-              ),
-            });
-          }
-          return nextList;
-        });
-      }
-    });
-  };
-
-  const toggleWebSpeech = () => {
-    if (!isWebSpeechActive) {
-      startAutoWebSpeech();
-    } else {
-      liveTranscriber.stopListening();
-      setIsWebSpeechActive(false);
-      setInterimSpeechText('');
+      setTargetedTranscribingIndex(null);
     }
   };
 
@@ -555,6 +404,9 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     if (audioRef.current && isFinite(clamped)) {
       audioRef.current.currentTime = clamped;
     }
+    if (dynamicSentences.length > 0) {
+      lookAheadEngineRef.current.updatePlaybackPosition(clamped);
+    }
   };
 
   const jumpSentence = (delta: number) => {
@@ -567,8 +419,13 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     }
   };
 
-  const switchChapter = (index: number) => {
+  const switchChapter = async (index: number) => {
     if (index >= 0 && audiobook?.chapters && index < audiobook.chapters.length) {
+      const targetCh = audiobook.chapters[index];
+      let chAudioUrl = targetCh.audioUrl;
+      if (audiobook.id.startsWith('custom-')) {
+        chAudioUrl = await getAudioBlobUrl(targetCh.id, chAudioUrl);
+      }
       setCurrentChapterIdx(index);
       setCurrentTime(0);
       setRealDuration(0);
@@ -743,21 +600,14 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
             <span>Sincronizar Legenda/Texto</span>
           </button>
 
-          {/* Native Web Speech Recognition (Zero AI) */}
-          {liveTranscriber.isSupported() && (
-            <button
-              onClick={toggleWebSpeech}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition ${
-                isWebSpeechActive
-                  ? 'bg-emerald-600 text-white border-emerald-500 shadow-md animate-pulse'
-                  : 'bg-slate-800 hover:bg-slate-700 text-emerald-400 border-slate-700'
-              }`}
-              title="Ativar reconhecimento de voz nativo do navegador (Web Speech API - Zero IA / Sem chaves)"
-            >
-              <Mic className="w-3.5 h-3.5" />
-              <span>{isWebSpeechActive ? 'Web Speech Ativo' : 'Reconhecer Fala (Web Speech)'}</span>
-            </button>
-          )}
+          {/* Gemini AI Transcription Status */}
+          <div
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border bg-indigo-950/60 text-indigo-300 border-indigo-700/50 shadow-sm"
+            title="Transcrição de áudio via IA Gemini (Sem custos)"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+            <span>Transcrição IA Gemini</span>
+          </div>
 
           {audiobook.chapters && audiobook.chapters.length > 0 && (
             <button
@@ -914,26 +764,14 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
             </div>
           )}
 
-          {/* Live Web Speech Recognition Feedback Banner */}
-          {isWebSpeechActive && (
-            <div className="p-4 rounded-xl bg-emerald-950/70 border border-emerald-500/60 shadow-lg text-xs text-emerald-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-pulse">
-              <div className="flex items-center gap-2.5">
-                <Mic className="w-4 h-4 text-emerald-400 shrink-0 animate-bounce" />
-                <div>
-                  <span className="font-bold text-emerald-100">Web Speech Nativo Ativo: </span>
-                  <span className="text-emerald-300">
-                    {interimSpeechText
-                      ? `"${interimSpeechText}"`
-                      : 'Escutando pelo microfone do navegador... Conforme a fala é reconhecida, as frases são sincronizadas e traduzidas.'}
-                  </span>
-                </div>
+          {/* Vercel Environment Configuration Warning if key is missing */}
+          {chunkTranscriber.lastWarning && (
+            <div className="p-4 rounded-xl bg-amber-950/80 border border-amber-600/70 shadow-lg text-xs text-amber-200 flex items-start gap-3">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-bold text-white">Configuração na Vercel:</p>
+                <p className="mt-0.5 text-amber-300 leading-relaxed">{chunkTranscriber.lastWarning}</p>
               </div>
-              <button
-                onClick={toggleWebSpeech}
-                className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg border border-slate-700 text-xs transition"
-              >
-                Pausar Reconhecimento
-              </button>
             </div>
           )}
 
@@ -1063,30 +901,32 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                     </div>
 
                     <div className="flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition flex-wrap">
-                      {/* Individual Phrase Web Speech Transcription Button */}
-                      {liveTranscriber.isSupported() && (
-                        <button
-                          onClick={() => transcribeSpecificSentence(sIdx)}
-                          disabled={targetedTranscribingIndex === sIdx}
-                          className={`flex items-center gap-1 px-2 py-0.5 text-[11px] rounded transition border ${
-                            targetedTranscribingIndex === sIdx
-                              ? 'bg-amber-600/40 text-amber-200 border-amber-500 animate-pulse'
-                              : isPlaceholder
-                              ? 'text-emerald-300 bg-emerald-950/40 hover:bg-emerald-950 border-emerald-800/60'
-                              : 'text-slate-400 hover:text-emerald-300 bg-slate-800/80 hover:bg-slate-700 border-slate-700'
-                          }`}
-                          title="Transcrever individualmente esta frase com a Web Speech API (Zero IA)"
-                        >
-                          <Mic className="w-3 h-3 text-emerald-400" />
-                          <span>
-                            {targetedTranscribingIndex === sIdx
-                              ? 'Escutando Frase...'
-                              : isPlaceholder
-                              ? 'Transcrever Frase'
-                              : 'Reconhecer Novamente'}
-                          </span>
-                        </button>
-                      )}
+                      {/* Individual Phrase Gemini AI Transcription Button */}
+                      <button
+                        onClick={() => transcribeSpecificSentence(sIdx)}
+                        disabled={targetedTranscribingIndex === sIdx}
+                        className={`flex items-center gap-1 px-2 py-0.5 text-[11px] rounded transition border ${
+                          targetedTranscribingIndex === sIdx
+                            ? 'bg-amber-600/40 text-amber-200 border-amber-500 animate-pulse'
+                            : isPlaceholder
+                            ? 'text-indigo-300 bg-indigo-950/50 hover:bg-indigo-900 border-indigo-800/60'
+                            : 'text-slate-400 hover:text-indigo-300 bg-slate-800/80 hover:bg-slate-700 border-slate-700'
+                        }`}
+                        title="Transcrever e alinhar esta frase com a IA Gemini (Sem custos)"
+                      >
+                        {targetedTranscribingIndex === sIdx ? (
+                          <Loader2 className="w-3 h-3 animate-spin text-amber-400" />
+                        ) : (
+                          <Sparkles className="w-3 h-3 text-indigo-400" />
+                        )}
+                        <span>
+                          {targetedTranscribingIndex === sIdx
+                            ? 'Transcrevendo...'
+                            : isPlaceholder
+                            ? 'Transcrever com IA'
+                            : 'Re-transcrever'}
+                        </span>
+                      </button>
 
                       <button
                         onClick={() => audioEngine.speakText(sentence.text)}
@@ -1155,9 +995,9 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                             <span
                               ref={isWordActive ? activeWordRef : null}
                               onClick={() => handleWordClick(cue, sentence)}
-                              className={`inline cursor-pointer select-text transition-all duration-100 rounded px-1 -mx-0.5 py-0.5 ${
+                              className={`inline cursor-pointer select-text transition-colors duration-100 rounded px-1 py-0.5 ${
                                 isWordActive
-                                  ? 'bg-indigo-600 text-white font-semibold ring-1 ring-indigo-400/80 shadow-sm'
+                                  ? 'bg-indigo-600 text-white shadow-sm ring-1 ring-indigo-400/50'
                                   : isWordSelected
                                   ? 'bg-emerald-500/30 text-emerald-200 underline underline-offset-4 decoration-emerald-400'
                                   : isCurrentSentence && isWordSpoken
@@ -1176,14 +1016,6 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                     ) : (
                       <span className="text-slate-200 font-serif leading-relaxed">
                         {sentence.text || `Phrase #${sIdx + 1}: Speech audio segment`}
-                      </span>
-                    )}
-
-                    {/* Live recognition preview when speaking/listening */}
-                    {isCurrentSentence && interimSpeechText && (
-                      <span className="inline-flex items-center gap-1 ml-2 text-xs font-sans text-amber-300 bg-amber-950/60 px-2 py-0.5 rounded-md border border-amber-800/40 not-italic align-middle animate-pulse">
-                        <Mic className="w-3 h-3 text-amber-400 inline" />
-                        <span>{interimSpeechText}</span>
                       </span>
                     )}
                   </p>
