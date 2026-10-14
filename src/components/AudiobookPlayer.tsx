@@ -223,9 +223,12 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
       : currentChapter?.duration || audiobook?.duration || 60;
 
   // Active sentence & word
-  const activeSentenceIndex = dynamicSentences.findIndex(
-    (s) => currentTime >= s.start && currentTime <= s.end
-  );
+  const activeSentenceIndex = dynamicSentences.findIndex((s, idx) => {
+    if (currentTime >= s.start && currentTime <= s.end) return true;
+    const nextStart = dynamicSentences[idx + 1]?.start ?? (s.end + 1.0);
+    if (currentTime > s.end && currentTime < nextStart) return true;
+    return false;
+  });
   const activeSentence =
     activeSentenceIndex !== -1 ? dynamicSentences[activeSentenceIndex] : null;
 
@@ -389,7 +392,8 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
       if (isFinal && text.trim().length > 0) {
         setInterimSpeechText('');
         const trimmed = text.trim();
-        const sIdx = activeSentenceIndex !== -1 ? activeSentenceIndex : 0;
+        if (activeSentenceIndex === -1) return;
+        const sIdx = activeSentenceIndex;
 
         setDynamicSentences((prev) => {
           const current = prev[sIdx];

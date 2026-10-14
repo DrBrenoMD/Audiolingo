@@ -26,6 +26,7 @@ import { extractBookFromFile } from '../utils/textExtractor';
 import { alignTextToAudio } from '../utils/fuzzyAligner';
 import { detectAcousticSentences } from '../utils/acousticSilenceDetector';
 import { PhraseLookAheadEngine } from '../utils/phraseLookAheadEngine';
+import { saveAudioBlob, getAudioBlobUrl, deleteAudioBlob } from '../utils/audioStorage';
 
 interface MediaManagerProps {
   audiobooks: Audiobook[];
@@ -98,8 +99,11 @@ export const MediaManager: React.FC<MediaManagerProps> = ({
   };
 
   // Audio preview toggle
-  const togglePreview = (book: Audiobook) => {
-    const audioUrl = book.chapters?.[0]?.audioUrl || book.audioUrl || '';
+  const togglePreview = async (book: Audiobook) => {
+    let audioUrl = book.chapters?.[0]?.audioUrl || book.audioUrl || '';
+    if (book.id.startsWith('custom-')) {
+      audioUrl = await getAudioBlobUrl(book.id, audioUrl);
+    }
     if (!audioUrl) return;
 
     if (previewPlayingId === book.id) {
@@ -140,6 +144,7 @@ export const MediaManager: React.FC<MediaManagerProps> = ({
   // Handle Delete Book
   const handleConfirmDelete = () => {
     if (!deletingBookId) return;
+    deleteAudioBlob(deletingBookId);
     onDeleteBook(deletingBookId);
     setDeletingBookId(null);
   };
@@ -303,6 +308,9 @@ export const MediaManager: React.FC<MediaManagerProps> = ({
       const newId = `custom-${Date.now()}`;
       const finalTitle = newTitle.trim() || uploadAudioFile.name.replace(/\.[^/.]+$/, '');
       const finalAuthor = newAuthor.trim() || 'Importado pelo Usuário';
+
+      // Save audio File/Blob to IndexedDB for cross-session gallery playback
+      await saveAudioBlob(newId, uploadAudioFile);
 
       const chapter: Chapter = {
         id: `chap-${newId}-1`,
@@ -508,8 +516,21 @@ export const MediaManager: React.FC<MediaManagerProps> = ({
                   {/* Actions Footer */}
                   <div className="flex items-center gap-2 pt-2 border-t border-slate-800/60">
                     <button
-                      onClick={() => {
-                        onSelectBook(book);
+                      onClick={async () => {
+                        let targetBook = book;
+                        if (book.id.startsWith('custom-')) {
+                          const restoredUrl = await getAudioBlobUrl(book.id, book.audioUrl);
+                          if (restoredUrl) {
+                            targetBook = {
+                              ...book,
+                              audioUrl: restoredUrl,
+                              chapters: book.chapters?.map((ch, idx) =>
+                                idx === 0 ? { ...ch, audioUrl: restoredUrl } : ch
+                              ),
+                            };
+                          }
+                        }
+                        onSelectBook(targetBook);
                         if (onClose) onClose();
                       }}
                       className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold transition ${

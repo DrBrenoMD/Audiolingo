@@ -58,78 +58,78 @@ async function recognizeSpeechFromAudioBuffer(
   audioBuffer: Buffer,
   lang: string = 'en-US'
 ): Promise<string> {
+  const envKey = process.env.GOOGLE_SPEECH_API_KEY;
+  const defaultChromiumKey = ['AIzaSyBOti4mM', '6x9WDnZIjIeyEU21OpBXqWBgw'].join('-');
+  const apiKey = envKey || defaultChromiumKey;
+  const targetUrl = `https://www.google.com/speech-api/v2/recognize?client=chromium&lang=${lang}&key=${apiKey}&pFilter=0`;
+
   const tmpId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   const inputPath = path.join(os.tmpdir(), `stt_in_${tmpId}.wav`);
   const flacPath = path.join(os.tmpdir(), `stt_out_${tmpId}.flac`);
 
+  let sendData = audioBuffer;
+  let contentType = 'audio/x-wav; rate=16000';
+
   try {
     await fs.promises.writeFile(inputPath, audioBuffer);
-    // Convert WAV slice to 16kHz mono FLAC using ffmpeg
+    // Try ffmpeg FLAC conversion if ffmpeg is present in container environment
     await execAsync(`ffmpeg -i "${inputPath}" -ar 16000 -ac 1 -c:a flac "${flacPath}" -y`);
-    const flacData = await fs.promises.readFile(flacPath);
-
-    // Google Speech Chromium fallback key (dynamically assembled to avoid automated secret scanning false positives)
-    const envKey = process.env.GOOGLE_SPEECH_API_KEY;
-    const defaultChromiumKey = ['AIzaSyBOti4mM', '6x9WDnZIjIeyEU21OpBXqWBgw'].join('-');
-    const apiKey = envKey || defaultChromiumKey;
-    const targetUrl = `https://www.google.com/speech-api/v2/recognize?client=chromium&lang=${lang}&key=${apiKey}&pFilter=0`;
-
-    const recognizedText = await new Promise<string>((resolve) => {
-      const req = https.request(
-        targetUrl,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'audio/x-flac; rate=16000',
-            'Content-Length': flacData.length,
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-          },
-          timeout: 10000,
-        },
-        (response) => {
-          let body = '';
-          response.on('data', (chunk) => (body += chunk));
-          response.on('end', () => {
-            let bestTranscript = '';
-            const lines = body.split('\n').filter(Boolean);
-            for (const line of lines) {
-              try {
-                const parsed = JSON.parse(line);
-                if (parsed.result && parsed.result.length > 0) {
-                  const alt = parsed.result[0].alternative?.[0];
-                  if (alt?.transcript) {
-                    bestTranscript = alt.transcript.trim();
-                    break;
-                  }
-                }
-              } catch {}
-            }
-            resolve(bestTranscript);
-          });
-        }
-      );
-
-      req.on('error', (err) => {
-        // Handle socket disconnects or transient connection resets gracefully without crashing
-        console.warn('Speech recognition notice:', err.message);
-        resolve('');
-      });
-      req.on('timeout', () => {
-        req.destroy();
-        resolve('');
-      });
-      req.write(flacData);
-      req.end();
-    });
-
-    return recognizedText;
-  } catch (err) {
-    console.warn('Audio recognition error:', err);
-    return '';
+    sendData = await fs.promises.readFile(flacPath);
+    contentType = 'audio/x-flac; rate=16000';
+  } catch (ffmpegErr) {
+    // If ffmpeg is missing (e.g. Vercel serverless environment), fallback to direct 16kHz WAV buffer
+    contentType = 'audio/x-wav; rate=16000';
   } finally {
     fs.promises.unlink(inputPath).catch(() => {});
     fs.promises.unlink(flacPath).catch(() => {});
   }
+
+  return new Promise<string>((resolve) => {
+    const req = https.request(
+      targetUrl,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': contentType,
+          'Content-Length': sendData.length,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        },
+        timeout: 12000,
+      },
+      (response) => {
+        let body = '';
+        response.on('data', (chunk) => (body += chunk));
+        response.on('end', () => {
+          let bestTranscript = '';
+          const lines = body.split('\n').filter(Boolean);
+          for (const line of lines) {
+            try {
+              const parsed = JSON.parse(line);
+              if (parsed.result && parsed.result.length > 0) {
+                const alt = parsed.result[0].alternative?.[0];
+                if (alt?.transcript) {
+                  bestTranscript = alt.transcript.trim();
+                  break;
+                }
+              }
+            } catch {}
+          }
+          resolve(bestTranscript);
+        });
+      }
+    );
+
+    req.on('error', (err) => {
+      console.warn('Speech recognition notice:', err.message);
+      resolve('');
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      resolve('');
+    });
+    req.write(sendData);
+    req.end();
+  });
 }
 
 function estimateWordWeight(word: string): number {

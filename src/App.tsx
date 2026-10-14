@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Audiobook, SRSFlashcard, UserStats } from './types';
 import { getInitialFlashcards, saveFlashcardsToStorage } from './utils/srs';
 import { isPlaceholderSentence } from './utils/fuzzyAligner';
+import { getAudioBlobUrl } from './utils/audioStorage';
 import { Navbar, NavTab } from './components/Navbar';
 import { AudiobookPlayer } from './components/AudiobookPlayer';
 import { MediaManager } from './components/MediaManager';
@@ -87,6 +88,28 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(STATS_KEY, JSON.stringify(stats));
   }, [stats]);
+
+  // Auto-restore custom audio blob URLs from IndexedDB for persistent gallery playback
+  useEffect(() => {
+    if (selectedAudiobook?.id?.startsWith('custom-')) {
+      const bookId = selectedAudiobook.id;
+      getAudioBlobUrl(bookId, selectedAudiobook.audioUrl).then((restoredUrl) => {
+        if (restoredUrl && restoredUrl !== selectedAudiobook.audioUrl) {
+          setSelectedAudiobook((prev) =>
+            prev && prev.id === bookId
+              ? {
+                  ...prev,
+                  audioUrl: restoredUrl,
+                  chapters: prev.chapters?.map((ch, idx) =>
+                    idx === 0 ? { ...ch, audioUrl: restoredUrl } : ch
+                  ),
+                }
+              : prev
+          );
+        }
+      });
+    }
+  }, [selectedAudiobook?.id]);
 
   // Handle saving to SRS deck (always preserves full sentence for sentence mining!)
   const handleSaveToSRS = (newCardData: Partial<SRSFlashcard>) => {
