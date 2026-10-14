@@ -600,13 +600,13 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
             <span>Sincronizar Legenda/Texto</span>
           </button>
 
-          {/* Gemini AI Transcription Status */}
+          {/* Whisper & Gemini AI Transcription Status */}
           <div
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border bg-indigo-950/60 text-indigo-300 border-indigo-700/50 shadow-sm"
-            title="Transcrição de áudio via IA Gemini (Sem custos)"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border bg-emerald-950/60 text-emerald-300 border-emerald-700/50 shadow-sm"
+            title="Transcrição de áudio via Whisper Large v3 Turbo (8h/dia grátis) & Gemini AI"
           >
-            <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-            <span>Transcrição IA Gemini</span>
+            <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Whisper IA · 8h/dia Grátis</span>
           </div>
 
           {audiobook.chapters && audiobook.chapters.length > 0 && (
@@ -912,7 +912,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                             ? 'text-indigo-300 bg-indigo-950/50 hover:bg-indigo-900 border-indigo-800/60'
                             : 'text-slate-400 hover:text-indigo-300 bg-slate-800/80 hover:bg-slate-700 border-slate-700'
                         }`}
-                        title="Transcrever e alinhar esta frase com a IA Gemini (Sem custos)"
+                        title="Transcrever e alinhar esta frase com Whisper IA (Sem custos - 8h/dia)"
                       >
                         {targetedTranscribingIndex === sIdx ? (
                           <Loader2 className="w-3 h-3 animate-spin text-amber-400" />

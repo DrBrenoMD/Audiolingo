@@ -134,8 +134,8 @@ export const SpeakingLab: React.FC<SpeakingLabProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           targetSentence: selectedSentenceText,
-          transcribedSpeech: selectedSentenceText, // reference target
           audioBase64: audioBase64 || undefined,
+          mimeType: 'audio/webm',
         }),
       });
 
@@ -349,6 +349,20 @@ export const SpeakingLab: React.FC<SpeakingLabProps> = ({
               </div>
             </div>
           </div>
+
+          {/* Transcribed Speech from Microphone (Whisper IA / Gemini) */}
+          {evaluation.recognizedText && (
+            <div className="p-4 rounded-xl bg-slate-950/80 border border-emerald-500/40 space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
+                  Transcrição da sua fala (Whisper IA · 8h/dia grátis):
+                </span>
+              </div>
+              <p className="text-base font-serif text-white italic">
+                "{evaluation.recognizedText}"
+              </p>
+            </div>
+          )}
 
           {/* Word-by-Word Color Breakdown */}
           <div className="space-y-2">

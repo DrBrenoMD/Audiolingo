@@ -77,7 +77,277 @@ async function translateText(text: string, from = 'en', to = 'pt-BR'): Promise<s
 // ==========================================
 // 1.1 Gemini AI Audio Speech-to-Text Transcription Engine (Zero Extra Cost / Free Tier)
 // ==========================================
+// ==========================================
+// 1.1 Multi-Provider AI Transcription Engine
+// Primary: OpenAI Whisper Large v3 Turbo via Groq (Huge Free Tier: 8 Hours/Day, 2,000 req/day, ultra-fast <0.5s)
+// Fallback: Google Gemini API (gemini-3.5-transcribe / gemini-3.8-flash)
+// ==========================================
 const chunkTranscriptionCache = new Map<string, any>();
+
+// Common Whisper silence hallucinations when audio contains pure digital silence
+const WHISPER_HALLUCINATIONS = new Set([
+  'thankyou',
+  'thankyou.',
+  'thanksforwatching',
+  'thanksforwatching.',
+  'subtitlesby',
+  'subtitlesbytheamara.orgcommunity',
+  'music',
+  'silence',
+]);
+
+function isWhisperHallucination(text: string): boolean {
+  const clean = text.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return WHISPER_HALLUCINATIONS.has(clean) || clean.startsWith('subtitlesby') || clean.startsWith('translatedby');
+}
+
+/**
+ * 1. Groq Whisper Single Audio Transcriber (Microphone / Quick Clips)
+ */
+async function transcribeAudioWithGroqWhisperSingle(
+  audioBase64: string,
+  mimeType: string = 'audio/webm',
+  promptText: string = 'Transcribe this audio accurately verbatim.'
+): Promise<string | null> {
+  const groqApiKey = process.env.GROQ_API_KEY;
+  if (!groqApiKey) return null;
+
+  const cleanBase64 = audioBase64.replace(/^data:[^;]+;base64,/, '').trim();
+  if (!cleanBase64) return '';
+
+  try {
+    const audioBuffer = Buffer.from(cleanBase64, 'base64');
+    const ext = mimeType.includes('webm') ? 'webm' : mimeType.includes('mp3') ? 'mp3' : 'wav';
+    const file = new File([audioBuffer], `audio.${ext}`, { type: mimeType });
+
+    const form = new FormData();
+    form.append('file', file);
+    form.append('model', 'whisper-large-v3-turbo');
+    form.append('response_format', 'json');
+    if (promptText) {
+      form.append('prompt', promptText);
+    }
+
+    const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${groqApiKey}`,
+      },
+      body: form,
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn('Groq single transcription returned status', res.status, errText);
+      return null;
+    }
+
+    const data: any = await res.json();
+    let text = (data.text || '').trim();
+    if (isWhisperHallucination(text)) return '';
+    return text;
+  } catch (err: any) {
+    console.warn('Groq single transcription exception:', err?.message || err);
+    return null;
+  }
+}
+
+/**
+ * 2. Groq Whisper Chunk Transcriber with native word-level and segment-level timestamps
+ * High-precision alignment directly from Whisper's acoustic engine.
+ */
+async function transcribeAudioWithGroqWhisper(
+  audioBase64: string,
+  mimeType: string = 'audio/wav',
+  startOffset: number = 0,
+  duration: number = 20,
+  language: string = 'en'
+): Promise<{
+  transcript: string;
+  sentences: Array<{
+    id: string;
+    index: number;
+    start: number;
+    end: number;
+    text: string;
+    translationPt: string;
+    words: Array<{ word: string; cleanWord: string; start: number; end: number; index: number }>;
+  }>;
+  engine: string;
+} | null> {
+  const groqApiKey = process.env.GROQ_API_KEY;
+  if (!groqApiKey) return null;
+
+  const cleanBase64 = audioBase64.replace(/^data:[^;]+;base64,/, '').trim();
+  if (!cleanBase64) return { transcript: '', sentences: [], engine: 'empty-audio' };
+
+  try {
+    const audioBuffer = Buffer.from(cleanBase64, 'base64');
+    const ext = mimeType.includes('webm') ? 'webm' : mimeType.includes('mp3') ? 'mp3' : 'wav';
+    const file = new File([audioBuffer], `segment.${ext}`, { type: mimeType });
+
+    const form = new FormData();
+    form.append('file', file);
+    form.append('model', 'whisper-large-v3-turbo');
+    form.append('response_format', 'verbose_json');
+    form.append('timestamp_granularities[]', 'word');
+    form.append('timestamp_granularities[]', 'segment');
+    if (language) {
+      form.append('language', language.split('-')[0].toLowerCase());
+    }
+
+    const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${groqApiKey}`,
+      },
+      body: form,
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn('Groq chunk transcription returned status', res.status, errText);
+      return null;
+    }
+
+    const data: any = await res.json();
+    let transcript = (data.text || '').trim();
+
+    if (isWhisperHallucination(transcript)) {
+      transcript = '';
+    }
+
+    if (!transcript) {
+      return { transcript: '', sentences: [], engine: 'whisper-large-v3-turbo' };
+    }
+
+    const numericStart = Number(startOffset) || 0;
+    const numericDuration = Math.max(0.6, Number(duration) || 5);
+    const targetEnd = +(numericStart + numericDuration).toFixed(2);
+
+    const whisperWords: Array<{ word: string; start: number; end: number }> = Array.isArray(data.words)
+      ? data.words
+      : [];
+
+    const rawSegments: Array<any> = Array.isArray(data.segments) && data.segments.length > 0
+      ? data.segments.filter((seg: any) => {
+          const sText = (seg.text || '').trim();
+          return sText && !isWhisperHallucination(sText);
+        })
+      : [];
+
+    // If segments were identified by Whisper
+    if (rawSegments.length > 0) {
+      const formattedSentences = await Promise.all(
+        rawSegments.map(async (seg: any, sIdx: number) => {
+          const segText = (seg.text || '').trim();
+          const sStart = +(numericStart + Math.max(0, Number(seg.start) || 0)).toFixed(2);
+          const rawEnd = Number(seg.end) || (Number(seg.start) + 2);
+          const sEnd = Math.min(targetEnd, +(numericStart + rawEnd).toFixed(2));
+          const pt = await translateText(segText);
+
+          // Find words that belong to this segment
+          const segmentWhisperWords = whisperWords.filter(
+            (w) => w.start >= (seg.start - 0.15) && w.start <= (rawEnd + 0.15)
+          );
+
+          let words: Array<{ word: string; cleanWord: string; start: number; end: number; index: number }>;
+          if (segmentWhisperWords.length > 0) {
+            words = segmentWhisperWords.map((w, wIdx) => ({
+              word: w.word.trim(),
+              cleanWord: w.word.trim().replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+              start: +(numericStart + Math.max(0, Number(w.start) || 0)).toFixed(2),
+              end: +(numericStart + Math.max(0, Number(w.end) || 0)).toFixed(2),
+              index: wIdx,
+            }));
+          } else {
+            const rawTokens = segText.split(/\s+/).filter(Boolean);
+            words = distributeWordTimestamps(rawTokens, sStart, Math.max(0.4, sEnd - sStart));
+          }
+
+          return {
+            id: `whisper-s-${Math.round(sStart * 100)}-${sIdx}`,
+            index: sIdx,
+            start: sStart,
+            end: Math.max(sStart + 0.4, sEnd),
+            text: segText,
+            translationPt: pt,
+            words,
+          };
+        })
+      );
+
+      return {
+        transcript,
+        sentences: formattedSentences,
+        engine: 'whisper-large-v3-turbo',
+      };
+    }
+
+    // Fallback: Split by punctuation if no distinct segments were extracted
+    const rawSentences = transcript.split(/(?<=[.?!])\s+/).filter(Boolean);
+    const count = Math.max(1, rawSentences.length);
+    const durPerSent = numericDuration / count;
+
+    const formattedSentences = await Promise.all(
+      rawSentences.map(async (stext: string, sIdx: number) => {
+        const sStart = +(numericStart + sIdx * durPerSent).toFixed(2);
+        const sEnd = sIdx === count - 1 ? targetEnd : +(numericStart + (sIdx + 1) * durPerSent).toFixed(2);
+        const sDur = Math.max(0.4, sEnd - sStart);
+        const pt = await translateText(stext);
+        const rawW = stext.split(/\s+/).filter(Boolean);
+        const words = distributeWordTimestamps(rawW, sStart, sDur);
+
+        return {
+          id: `whisper-s-${Math.round(sStart * 100)}-${sIdx}`,
+          index: sIdx,
+          start: sStart,
+          end: sEnd,
+          text: stext.trim(),
+          translationPt: pt,
+          words,
+        };
+      })
+    );
+
+    return {
+      transcript,
+      sentences: formattedSentences,
+      engine: 'whisper-large-v3-turbo',
+    };
+  } catch (err: any) {
+    console.warn('Groq Whisper execution error, falling back:', err?.message || err);
+    return null;
+  }
+}
+
+/**
+ * 3. Gemini Audio Transcriber (Secondary / Fallback Engine)
+ */
+async function transcribeAudioWithGemini35(
+  audioBase64: string,
+  mimeType: string = 'audio/webm',
+  promptText: string = 'Transcribe this audio.'
+): Promise<string> {
+  const cleanBase64 = audioBase64.replace(/^data:[^;]+;base64,/, '').trim();
+  if (!cleanBase64 || !ai) return '';
+
+  const audioPart = {
+    inlineData: {
+      mimeType: mimeType || 'audio/webm',
+      data: cleanBase64,
+    },
+  };
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-3.5-transcribe',
+    contents: {
+      parts: [audioPart, { text: promptText }],
+    },
+  });
+
+  return response.text?.trim() || '';
+}
 
 async function transcribeAudioWithGemini(
   audioBase64: string,
@@ -104,19 +374,13 @@ async function transcribeAudioWithGemini(
     return { transcript: '', sentences: [], engine: 'empty-audio' };
   }
 
-  const cacheKey = `${cleanBase64.slice(0, 60)}_${cleanBase64.length}_${Math.round(startOffset)}_${Math.round(duration)}`;
-  if (chunkTranscriptionCache.has(cacheKey)) {
-    return chunkTranscriptionCache.get(cacheKey)!;
-  }
-
   if (!ai) {
-    console.warn('GEMINI_API_KEY is not defined in environment variables.');
     return {
       transcript: '',
       sentences: [],
-      engine: 'missing-gemini-key',
+      engine: 'missing-keys',
       warning:
-        'A variável GEMINI_API_KEY não foi encontrada. No painel da Vercel (Project Settings > Environment Variables), adicione a chave GEMINI_API_KEY com sua chave gratuita do Google AI Studio para ativar a transcrição com IA sem custos.',
+        'Nenhuma chave de IA configurada. Adicione GROQ_API_KEY (recomendado: 8 horas/dia grátis de Whisper) ou GEMINI_API_KEY nas variáveis de ambiente da Vercel para ativar a transcrição com IA sem custos.',
     };
   }
 
@@ -125,77 +389,29 @@ async function transcribeAudioWithGemini(
   const targetEnd = +(numericStart + numericDuration).toFixed(2);
 
   let rawTranscript = '';
-  let modelSentences: any[] = [];
 
   try {
-    // 1. Primary: Try gemini-3.8-flash with JSON mode for high accuracy and natural sentence boundaries
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: [
-        {
-          inlineData: {
-            mimeType: mimeType || 'audio/wav',
-            data: cleanBase64,
-          },
-        },
-        {
-          text: `You are an audio transcriber for language learning.
-Task: Transcribe the spoken audio segment accurately.
-Audio start offset: ${numericStart.toFixed(2)}s, duration: ${numericDuration.toFixed(2)}s.
-Language: ${language || 'en'}.
-
-Instructions:
-1. Transcribe spoken words verbatim. Do not omit any words.
-2. Break the transcription down into natural grammatical sentences.
-3. For each sentence, provide the English text, Brazilian Portuguese translation, start timestamp (in seconds, starting near ${numericStart.toFixed(2)}s), end timestamp, and word tokens with start and end times.
-4. If there is only silence or no speech, return empty transcript and empty sentences array.
-
-Return valid JSON with format:
-{
-  "transcript": "full text",
-  "sentences": [
-    {
-      "text": "sentence in English",
-      "translationPt": "tradução em português",
-      "start": ${numericStart.toFixed(2)},
-      "end": ${targetEnd},
-      "words": [{"word": "example", "start": ${numericStart.toFixed(2)}, "end": ${targetEnd}}]
-    }
-  ]
-}`,
-        },
-      ],
-      config: {
-        responseMimeType: 'application/json',
-      },
-    });
-
-    const parsed = JSON.parse(response.text || '{}');
-    if (parsed.transcript && typeof parsed.transcript === 'string') {
-      rawTranscript = parsed.transcript.trim();
-    }
-    if (Array.isArray(parsed.sentences) && parsed.sentences.length > 0) {
-      modelSentences = parsed.sentences;
-    }
+    rawTranscript = await transcribeAudioWithGemini35(
+      cleanBase64,
+      mimeType,
+      'Transcribe this audio segment accurately verbatim without omitting words.'
+    );
   } catch (err: any) {
-    console.warn('Gemini 3.8 Flash transcribe notice, falling back to gemini-3.5-transcribe:', err?.message || err);
+    console.warn('gemini-3.5-transcribe notice, trying gemini-3.8-flash:', err?.message || err);
     try {
-      // 2. Fallback: Try gemini-3.5-transcribe
-      const transcribeRes = await ai.models.generateContent({
-        model: 'gemini-3.5-transcribe',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType: mimeType || 'audio/wav',
-                data: cleanBase64,
-              },
+      const flashRes = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: [
+          {
+            inlineData: {
+              mimeType: mimeType || 'audio/wav',
+              data: cleanBase64,
             },
-            { text: 'Transcribe this audio segment accurately verbatim without omitting words.' },
-          ],
-        },
+          },
+          { text: 'Transcribe this audio segment accurately verbatim.' },
+        ],
       });
-      rawTranscript = transcribeRes.text?.trim() || '';
+      rawTranscript = flashRes.text?.trim() || '';
     } catch (fallbackErr: any) {
       console.error('All Gemini transcription attempts failed:', fallbackErr?.message || fallbackErr);
       return {
@@ -207,82 +423,38 @@ Return valid JSON with format:
     }
   }
 
-  // If model returned structured sentences with words, format and validate them
-  if (modelSentences.length > 0) {
-    const formattedSentences = modelSentences
-      .map((s: any, idx: number) => {
-        const sText = (s.text || '').trim();
-        const sStart = typeof s.start === 'number' ? +s.start.toFixed(2) : numericStart;
-        const sEnd = typeof s.end === 'number' ? +s.end.toFixed(2) : targetEnd;
-        const sDur = Math.max(0.4, sEnd - sStart);
+  if (rawTranscript.length > 0) {
+    const cleanText = rawTranscript.trim();
+    const rawSentences = cleanText.split(/(?<=[.?!])\s+/).filter(Boolean);
+    const count = Math.max(1, rawSentences.length);
+    const durPerSent = numericDuration / count;
 
-        let words: any[] = [];
-        if (Array.isArray(s.words) && s.words.length > 0) {
-          words = s.words.map((w: any, wi: number) => ({
-            word: w.word || '',
-            cleanWord: (w.word || '').replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
-            start:
-              typeof w.start === 'number'
-                ? +w.start.toFixed(2)
-                : +(sStart + (wi / s.words.length) * sDur).toFixed(2),
-            end:
-              typeof w.end === 'number'
-                ? +w.end.toFixed(2)
-                : +(sStart + ((wi + 1) / s.words.length) * sDur).toFixed(2),
-            index: wi,
-          }));
-        } else {
-          const rawW = sText.split(/\s+/).filter(Boolean);
-          words = distributeWordTimestamps(rawW, sStart, sDur);
-        }
+    const formattedSentences = await Promise.all(
+      rawSentences.map(async (stext, sIdx) => {
+        const sStart = +(numericStart + sIdx * durPerSent).toFixed(2);
+        const sEnd = sIdx === count - 1 ? targetEnd : +(numericStart + (sIdx + 1) * durPerSent).toFixed(2);
+        const sDur = Math.max(0.4, sEnd - sStart);
+        const pt = await translateText(stext);
+        const rawW = stext.split(/\s+/).filter(Boolean);
+        const words = distributeWordTimestamps(rawW, sStart, sDur);
 
         return {
-          id: `gemini-s-${Math.round(sStart * 100)}-${idx}`,
-          index: idx,
+          id: `gemini-s-${Math.round(sStart * 100)}-${sIdx}`,
+          index: sIdx,
           start: sStart,
           end: sEnd,
-          text: sText,
-          translationPt: s.translationPt || '',
+          text: stext.trim(),
+          translationPt: pt,
           words,
         };
       })
-      .filter((s) => s.text.length > 0);
+    );
 
-    if (formattedSentences.length > 0) {
-      const result = {
-        transcript: rawTranscript || formattedSentences.map((s) => s.text).join(' '),
-        sentences: formattedSentences,
-        engine: 'gemini-ai-transcription',
-      };
-      chunkTranscriptionCache.set(cacheKey, result);
-      return result;
-    }
-  }
-
-  // If we only have plain transcript text (from gemini-3.5-transcribe or raw fallback)
-  if (rawTranscript.length > 0) {
-    const cleanText = rawTranscript.trim();
-    const ptTranslation = await translateText(cleanText);
-    const rawWords = cleanText.split(/\s+/).filter(Boolean);
-    const finalWords = distributeWordTimestamps(rawWords, numericStart, numericDuration);
-
-    const singleSentence = {
-      id: `gemini-s-${Math.round(numericStart * 100)}`,
-      index: 0,
-      start: +numericStart.toFixed(2),
-      end: targetEnd,
-      text: cleanText,
-      translationPt: ptTranslation,
-      words: finalWords,
-    };
-
-    const result = {
+    return {
       transcript: cleanText,
-      sentences: [singleSentence],
-      engine: 'gemini-ai-transcription',
+      sentences: formattedSentences,
+      engine: 'gemini-3.5-transcribe',
     };
-    chunkTranscriptionCache.set(cacheKey, result);
-    return result;
   }
 
   return {
@@ -291,6 +463,126 @@ Return valid JSON with format:
     engine: 'no-speech-detected',
   };
 }
+
+/**
+ * 4. Unified Chunk Transcription Orchestrator
+ * Priority 1: Groq Whisper Large v3 Turbo (8h/day free quota, word timestamps, <0.5s speed)
+ * Priority 2: Google Gemini (gemini-3.5-transcribe)
+ */
+async function unifiedTranscribeChunk(
+  audioBase64: string,
+  mimeType: string = 'audio/wav',
+  startOffset: number = 0,
+  duration: number = 20,
+  language: string = 'en-US'
+) {
+  const cleanBase64 = audioBase64.replace(/^data:[^;]+;base64,/, '').trim();
+  if (!cleanBase64) {
+    return { transcript: '', sentences: [], engine: 'empty-audio' };
+  }
+
+  const cacheKey = `${cleanBase64.slice(0, 60)}_${cleanBase64.length}_${Math.round(startOffset)}_${Math.round(duration)}`;
+  if (chunkTranscriptionCache.has(cacheKey)) {
+    return chunkTranscriptionCache.get(cacheKey)!;
+  }
+
+  // 1. Try Groq Whisper Large v3 Turbo first if available
+  if (process.env.GROQ_API_KEY) {
+    const groqResult = await transcribeAudioWithGroqWhisper(
+      cleanBase64,
+      mimeType,
+      startOffset,
+      duration,
+      language
+    );
+    if (groqResult) {
+      chunkTranscriptionCache.set(cacheKey, groqResult);
+      return groqResult;
+    }
+  }
+
+  // 2. Fallback to Gemini AI
+  const geminiResult = await transcribeAudioWithGemini(
+    cleanBase64,
+    mimeType,
+    startOffset,
+    duration,
+    language
+  );
+  chunkTranscriptionCache.set(cacheKey, geminiResult);
+  return geminiResult;
+}
+
+// Dedicated endpoint to check active AI Transcription engine & limits
+app.get('/api/transcription-provider-info', (req, res) => {
+  const hasGroq = Boolean(process.env.GROQ_API_KEY);
+  const hasGemini = Boolean(ai);
+
+  let activeEngine = 'none';
+  let activeModel = 'nenhum';
+  let limitDescription = 'Nenhuma chave configurada';
+
+  if (hasGroq) {
+    activeEngine = 'groq-whisper';
+    activeModel = 'whisper-large-v3-turbo';
+    limitDescription = '8 HORAS DE ÁUDIO POR DIA (28.800 seg/dia, 2.000 req/dia) - Gratuito sem cartão';
+  } else if (hasGemini) {
+    activeEngine = 'google-gemini';
+    activeModel = 'gemini-3.5-transcribe';
+    limitDescription = 'Cota gratuita do Google AI Studio (15 req/min, 1.500 req/dia)';
+  }
+
+  res.json({
+    activeEngine,
+    activeModel,
+    limitDescription,
+    groqConfigured: hasGroq,
+    geminiConfigured: hasGemini,
+  });
+});
+
+// Dedicated endpoint to transcribe microphone or single audio file
+app.post('/api/transcribe', async (req, res) => {
+  try {
+    const { audioBase64, mimeType = 'audio/webm', prompt = 'Transcribe this audio.' } = req.body;
+    if (!audioBase64) {
+      return res.status(400).json({ error: 'audioBase64 is required' });
+    }
+
+    // 1. Try Groq Whisper first (8h/day free)
+    if (process.env.GROQ_API_KEY) {
+      const groqText = await transcribeAudioWithGroqWhisperSingle(audioBase64, mimeType, prompt);
+      if (groqText !== null) {
+        const translationPt = groqText ? await translateText(groqText) : '';
+        return res.json({
+          transcript: groqText,
+          translationPt,
+          model: 'whisper-large-v3-turbo (Groq - 8h/dia grátis)',
+        });
+      }
+    }
+
+    // 2. Fallback to Gemini
+    if (ai) {
+      const transcript = await transcribeAudioWithGemini35(audioBase64, mimeType, prompt);
+      const translationPt = transcript ? await translateText(transcript) : '';
+      return res.json({
+        transcript,
+        translationPt,
+        model: 'gemini-3.5-transcribe',
+      });
+    }
+
+    return res.status(503).json({
+      error: 'No transcription AI configured',
+      warning:
+        'Nenhuma chave de IA foi encontrada. No painel da Vercel (Project Settings > Environment Variables), adicione GROQ_API_KEY (recomendado: 8 horas/dia grátis de Whisper) ou GEMINI_API_KEY para ativar a transcrição com IA sem custos.',
+    });
+  } catch (err: any) {
+    console.error('Error in /api/transcribe:', err);
+    return res.status(500).json({ error: err.message || 'Failed to transcribe audio' });
+  }
+});
 
 function estimateWordWeight(word: string): number {
   const clean = word.toLowerCase().replace(/[^a-z]/g, '');
@@ -406,9 +698,9 @@ app.post('/api/transcribe-chunk', async (req, res) => {
       });
     }
 
-    // 2. If audio chunk base64 is provided, transcribe with Gemini AI
+    // 2. If audio chunk base64 is provided, transcribe with unified AI engine (Groq Whisper Large v3 Turbo / Gemini)
     if (audioChunkBase64 && typeof audioChunkBase64 === 'string' && audioChunkBase64.length > 50) {
-      const result = await transcribeAudioWithGemini(
+      const result = await unifiedTranscribeChunk(
         audioChunkBase64,
         mimeType,
         numericStart,
@@ -658,13 +950,33 @@ function levenshteinDistance(s1: string, s2: string): number {
 
 app.post('/api/speaking-evaluate', async (req, res) => {
   try {
-    const { targetSentence, transcribedSpeech } = req.body;
+    const { targetSentence, transcribedSpeech, audioBase64, mimeType = 'audio/webm' } = req.body;
     if (!targetSentence) {
       return res.status(400).json({ error: 'targetSentence is required' });
     }
 
+    let actualSpokenText = transcribedSpeech || '';
+
+    // If microphone audio is sent, transcribe with Whisper Large v3 Turbo (Groq 8h/day free) or Gemini
+    if (audioBase64 && typeof audioBase64 === 'string') {
+      try {
+        let aiTranscript: string | null = null;
+        if (process.env.GROQ_API_KEY) {
+          aiTranscript = await transcribeAudioWithGroqWhisperSingle(audioBase64, mimeType, 'Transcribe this spoken speech accurately verbatim.');
+        }
+        if (!aiTranscript && ai) {
+          aiTranscript = await transcribeAudioWithGemini35(audioBase64, mimeType, 'Transcribe this spoken speech accurately verbatim.');
+        }
+        if (aiTranscript) {
+          actualSpokenText = aiTranscript;
+        }
+      } catch (sttErr) {
+        console.warn('Speaking evaluation STT notice:', sttErr);
+      }
+    }
+
     const cleanTargetWords = targetSentence.split(/\s+/).map((w: string) => w.replace(/[^a-zA-Z']/g, '').toLowerCase()).filter(Boolean);
-    const cleanSpokenWords = (transcribedSpeech || '').split(/\s+/).map((w: string) => w.replace(/[^a-zA-Z']/g, '').toLowerCase()).filter(Boolean);
+    const cleanSpokenWords = (actualSpokenText || '').split(/\s+/).map((w: string) => w.replace(/[^a-zA-Z']/g, '').toLowerCase()).filter(Boolean);
 
     let matchCount = 0;
     const wordAnalysis = cleanTargetWords.map((tWord: string) => {
@@ -720,7 +1032,7 @@ app.post('/api/speaking-evaluate', async (req, res) => {
       overallScore,
       fluencyScore,
       accuracyScore,
-      recognizedText: transcribedSpeech || 'Áudio recebido',
+      recognizedText: actualSpokenText || transcribedSpeech || 'Áudio recebido',
       wordAnalysis,
       positiveFeedbackPt: overallScore >= 80 ? 'Excelente clareza e ritmo de fala!' : 'Boa tentativa! A estrutura da frase foi mantida.',
       improvementTipsPt: overallScore < 75 ? 'Dica: pratique a articulação das palavras destacadas em amarelo ou vermelho tocando no ícone de áudio.' : 'Continue repetindo para consolidar a fluência natural.',
@@ -1074,7 +1386,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`EchoLingo server running on http://0.0.0.0:${PORT} (Gemini AI Transcription Engine)`);
+    console.log(`EchoLingo server running on http://0.0.0.0:${PORT} (Groq Whisper Large v3 Turbo 8h/day free & Gemini AI)`);
   });
 }
 
