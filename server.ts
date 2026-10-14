@@ -129,6 +129,79 @@ async function recognizeSpeechFromAudioBuffer(
   }
 }
 
+function estimateWordWeight(word: string): number {
+  const clean = word.toLowerCase().replace(/[^a-z]/g, '');
+  if (!clean) return 1.0;
+
+  // Short grammatical function words spoken very rapidly in continuous speech
+  const shortStops = new Set([
+    'a', 'an', 'the', 'in', 'on', 'at', 'to', 'of', 'and', 'or', 'is', 'it', 'as', 'he', 'we', 'i', 'my', 'by', 'up', 'so', 'if', 'be', 'me', 'us'
+  ]);
+  if (shortStops.has(clean)) {
+    return 0.65;
+  }
+
+  // Count vowel clusters as syllables
+  const replaced = clean.replace(/(?:[^laeiouy]|ed|es|e)$/, '').replace(/^y/, '');
+  const matches = replaced.match(/[aeiouy]{1,2}/g);
+  const syllables = matches ? Math.max(1, matches.length) : 1;
+
+  let weight = syllables * 1.0;
+  if (clean.length > 7) weight += 0.35;
+
+  // Additional weight for punctuation pauses (comma, semicolon, dash, terminal punctuation)
+  if (/[,;—–-]$/.test(word)) {
+    weight += 0.55;
+  } else if (/[.!?]$/.test(word)) {
+    weight += 0.85;
+  }
+
+  return Math.max(0.5, weight);
+}
+
+function distributeWordTimestamps(
+  rawWords: string[],
+  startOffset: number,
+  duration: number
+): { word: string; cleanWord: string; start: number; end: number; index: number }[] {
+  if (rawWords.length === 0) return [];
+  if (rawWords.length === 1) {
+    const w = rawWords[0];
+    return [{
+      word: w,
+      cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+      start: +startOffset.toFixed(2),
+      end: +(startOffset + duration).toFixed(2),
+      index: 0,
+    }];
+  }
+
+  const weights = rawWords.map(estimateWordWeight);
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+
+  let currentStart = startOffset;
+  const result = [];
+
+  for (let i = 0; i < rawWords.length; i++) {
+    const w = rawWords[i];
+    const isLast = i === rawWords.length - 1;
+    const wordDur = (weights[i] / totalWeight) * duration;
+    const wordEnd = isLast ? startOffset + duration : currentStart + wordDur;
+
+    result.push({
+      word: w,
+      cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+      start: +currentStart.toFixed(2),
+      end: +wordEnd.toFixed(2),
+      index: i,
+    });
+
+    currentStart = wordEnd;
+  }
+
+  return result;
+}
+
 // ==========================================
 // 2. Traditional Deterministic Audio Cadence & Speech Recognition (/api/transcribe-chunk)
 // ==========================================
@@ -154,15 +227,7 @@ app.post('/api/transcribe-chunk', async (req, res) => {
     if (cleanText.length > 0) {
       const ptTranslation = await translateText(cleanText);
       const rawWords = cleanText.split(/\s+/).filter(Boolean);
-      const wordDur = numericDuration / Math.max(1, rawWords.length);
-
-      const finalWords = rawWords.map((w, wi) => ({
-        word: w,
-        cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
-        start: +(numericStart + wi * wordDur).toFixed(2),
-        end: +(numericStart + (wi + 1) * wordDur).toFixed(2),
-        index: wi,
-      }));
+      const finalWords = distributeWordTimestamps(rawWords, numericStart, numericDuration);
 
       const sentence = {
         id: `s-${Math.round(numericStart * 100)}`,

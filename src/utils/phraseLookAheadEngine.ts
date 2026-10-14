@@ -26,6 +26,76 @@ export interface LookAheadPhrase {
 export type PhraseUpdateCallback = (updatedSentence: Sentence) => void;
 export type QueueStatusCallback = (activePhrases: LookAheadPhrase[], currentPhraseIndex: number) => void;
 
+function estimateWordWeight(word: string): number {
+  const clean = word.toLowerCase().replace(/[^a-z]/g, '');
+  if (!clean) return 1.0;
+
+  const shortStops = new Set([
+    'a', 'an', 'the', 'in', 'on', 'at', 'to', 'of', 'and', 'or', 'is', 'it', 'as', 'he', 'we', 'i', 'my', 'by', 'up', 'so', 'if', 'be', 'me', 'us'
+  ]);
+  if (shortStops.has(clean)) {
+    return 0.65;
+  }
+
+  const replaced = clean.replace(/(?:[^laeiouy]|ed|es|e)$/, '').replace(/^y/, '');
+  const matches = replaced.match(/[aeiouy]{1,2}/g);
+  const syllables = matches ? Math.max(1, matches.length) : 1;
+
+  let weight = syllables * 1.0;
+  if (clean.length > 7) weight += 0.35;
+
+  if (/[,;—–-]$/.test(word)) {
+    weight += 0.55;
+  } else if (/[.!?]$/.test(word)) {
+    weight += 0.85;
+  }
+
+  return Math.max(0.5, weight);
+}
+
+export function distributeWordTimestamps(
+  rawWords: string[],
+  startOffset: number,
+  duration: number
+): WordCue[] {
+  if (rawWords.length === 0) return [];
+  if (rawWords.length === 1) {
+    const w = rawWords[0];
+    return [{
+      word: w,
+      cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+      start: +startOffset.toFixed(2),
+      end: +(startOffset + duration).toFixed(2),
+      index: 0,
+    }];
+  }
+
+  const weights = rawWords.map(estimateWordWeight);
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+
+  let currentStart = startOffset;
+  const result: WordCue[] = [];
+
+  for (let i = 0; i < rawWords.length; i++) {
+    const w = rawWords[i];
+    const isLast = i === rawWords.length - 1;
+    const wordDur = (weights[i] / totalWeight) * duration;
+    const wordEnd = isLast ? startOffset + duration : currentStart + wordDur;
+
+    result.push({
+      word: w,
+      cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+      start: +currentStart.toFixed(2),
+      end: +wordEnd.toFixed(2),
+      index: i,
+    });
+
+    currentStart = wordEnd;
+  }
+
+  return result;
+}
+
 export class PhraseLookAheadEngine {
   private sentences: Sentence[] = [];
   private currentPhraseIndex: number = -1;
@@ -207,14 +277,7 @@ export class PhraseLookAheadEngine {
       let wordCues = sentence.words && sentence.words.length > 0 ? sentence.words : [];
 
       if (wordCues.length === 0 && rawWords.length > 0) {
-        const wordDur = duration / Math.max(1, rawWords.length);
-        wordCues = rawWords.map((w, wIdx) => ({
-          word: w,
-          cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
-          start: Number((sentence.start + wIdx * wordDur).toFixed(2)),
-          end: Number((sentence.start + (wIdx + 1) * wordDur).toFixed(2)),
-          index: wIdx,
-        }));
+        wordCues = distributeWordTimestamps(rawWords, sentence.start, duration);
       }
 
       let translationPt = sentence.translationPt || '';
@@ -362,15 +425,7 @@ export class PhraseLookAheadEngine {
 
       const rawWords = sentenceText.split(/\s+/).filter(Boolean);
       const segDuration = Math.max(0.5, seg.end - seg.start);
-      const wordDur = segDuration / Math.max(1, rawWords.length);
-
-      const wordCues: WordCue[] = rawWords.map((w, wIdx) => ({
-        word: w,
-        cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
-        start: Number((seg.start + wIdx * wordDur).toFixed(2)),
-        end: Number((seg.start + (wIdx + 1) * wordDur).toFixed(2)),
-        index: wIdx,
-      }));
+      const wordCues: WordCue[] = distributeWordTimestamps(rawWords, seg.start, segDuration);
 
       return {
         id: `acoustic-phrase-${idx + 1}`,

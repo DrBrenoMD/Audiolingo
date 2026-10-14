@@ -233,16 +233,29 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     (w) => currentTime >= w.start && currentTime <= w.end
   );
 
-  // Auto-scroll active word into view smoothly
+  // Smart, calm auto-scroll: Scrolls smoothly ONLY when active sentence moves outside visible container viewport
   useEffect(() => {
-    if (activeWordRef.current && isPlaying) {
-      activeWordRef.current.scrollIntoView({
+    if (!isPlaying || activeSentenceIndex === -1 || !containerRef.current) return;
+    const activeEl = containerRef.current.querySelector(
+      `[data-sentence-index="${activeSentenceIndex}"]`
+    ) as HTMLElement;
+    if (!activeEl) return;
+
+    const container = containerRef.current;
+    const containerRect = container.getBoundingClientRect();
+    const elRect = activeEl.getBoundingClientRect();
+
+    const isTooHigh = elRect.top < containerRect.top + 40;
+    const isTooLow = elRect.bottom > containerRect.bottom - 80;
+
+    if (isTooHigh || isTooLow) {
+      activeEl.scrollIntoView({
         behavior: 'smooth',
-        block: 'center',
-        inline: 'center',
+        block: 'nearest',
+        inline: 'nearest',
       });
     }
-  }, [activeWordCue?.word, isPlaying]);
+  }, [activeSentenceIndex, isPlaying]);
 
   // Fila de Antecipação de 3 Frases: Atualiza a cada avanço temporal
   useEffect(() => {
@@ -977,6 +990,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
               return (
                 <div
                   key={sentence.id || sIdx}
+                  data-sentence-index={sIdx}
                   className={`group relative p-4 rounded-2xl transition-all duration-300 border ${
                     isCurrentSentence
                       ? 'bg-slate-900/90 border-indigo-500/50 shadow-xl shadow-indigo-950/20'
@@ -1142,7 +1156,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                               onClick={() => handleWordClick(cue, sentence)}
                               className={`inline cursor-pointer select-text transition-all duration-100 rounded px-1 -mx-0.5 py-0.5 ${
                                 isWordActive
-                                  ? 'bg-indigo-600 text-white font-semibold ring-2 ring-indigo-400 shadow-md shadow-indigo-900/50 scale-105 inline-block z-10'
+                                  ? 'bg-indigo-600 text-white font-semibold ring-1 ring-indigo-400/80 shadow-sm'
                                   : isWordSelected
                                   ? 'bg-emerald-500/30 text-emerald-200 underline underline-offset-4 decoration-emerald-400'
                                   : isCurrentSentence && isWordSpoken

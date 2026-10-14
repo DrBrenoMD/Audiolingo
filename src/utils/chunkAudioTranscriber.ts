@@ -60,8 +60,10 @@ export class ChunkAudioTranscriber {
         return [];
       }
 
-      // 1. Slice audio in-browser down to a compact 16kHz WAV blob
-      const wavBlob = sliceAudioBufferToWavBlob(audioBuffer, startSec, actualEnd, 16000);
+      // 1. Slice audio with acoustic lead-in (0.25s) and lead-out (0.35s) padding so boundary phonemes are never clipped
+      const sliceStart = Math.max(0, startSec - 0.25);
+      const sliceEnd = Math.min(audioBuffer.duration, actualEnd + 0.35);
+      const wavBlob = sliceAudioBufferToWavBlob(audioBuffer, sliceStart, sliceEnd, 16000);
 
       // 2. Convert to base64
       const base64 = await blobToBase64(wavBlob);

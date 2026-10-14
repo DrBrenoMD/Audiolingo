@@ -62,11 +62,11 @@ export async function detectAcousticSentences(
   options: SilenceDetectionOptions = {}
 ): Promise<AcousticSegment[]> {
   const {
-    minSilenceDuration = 0.32,
+    minSilenceDuration = 0.28,
     silenceThresholdDb = -42,
-    minSpeechDuration = 0.7,
-    maxSpeechDuration = 10.0,
-    paddingSeconds = 0.08,
+    minSpeechDuration = 0.6,
+    maxSpeechDuration = 12.0,
+    paddingSeconds = 0.22,
   } = options;
 
   let buffer: AudioBuffer;
@@ -131,7 +131,6 @@ export async function detectAcousticSentences(
 
     if (!inSpeech) {
       if (!isSilent) {
-        // Início detectado de fala
         inSpeech = true;
         speechStartFrame = f;
         silenceCounter = 0;
@@ -144,17 +143,12 @@ export async function detectAcousticSentences(
       }
 
       const currentSpeechDurationFrames = f - speechStartFrame;
-
-      // Condição 1: Silêncio longo o suficiente para quebrar a frase
-      // Condição 2: Frase excedeu a duração máxima (forçar corte no menor vale recente)
       const reachedSilenceThreshold = silenceCounter >= minSilenceFrames;
       const reachedMaxDuration = currentSpeechDurationFrames >= maxSpeechFrames;
 
       if (reachedSilenceThreshold || reachedMaxDuration) {
-        // Encontra o ponto ótimo de corte
         let speechEndFrame = f - (reachedSilenceThreshold ? silenceCounter : 0);
 
-        // Se forçado por duração máxima, procura o vale de menor energia nos últimos 20% da frase
         if (reachedMaxDuration && !reachedSilenceThreshold) {
           const searchRangeStart = Math.floor(speechStartFrame + maxSpeechFrames * 0.7);
           let valleyFrame = searchRangeStart;
@@ -191,7 +185,6 @@ export async function detectAcousticSentences(
     }
   }
 
-  // Se o áudio terminou enquanto falava, salva o último segmento
   if (inSpeech) {
     const speechEndFrame = numFrames;
     const durationFrames = speechEndFrame - speechStartFrame;
@@ -210,7 +203,6 @@ export async function detectAcousticSentences(
     }
   }
 
-  // Fallback de segurança: se o áudio não produziu pausas nítidas (ex: música contínua ou ruído)
   if (segments.length === 0 && totalDuration > 0) {
     const chunkDur = 6.0;
     const count = Math.ceil(totalDuration / chunkDur);
@@ -225,6 +217,34 @@ export async function detectAcousticSentences(
         duration: Number((end - start).toFixed(2)),
       });
     }
+  }
+
+  // Passagem de Alinhamento e Costura Contínua sem zonas mortas entre frases
+  if (segments.length > 0) {
+    segments[0].start = 0;
+    for (let i = 0; i < segments.length - 1; i++) {
+      const current = segments[i];
+      const next = segments[i + 1];
+      if (next.start > current.end) {
+        const gap = next.start - current.end;
+        if (gap < 0.8) {
+          const mid = Number(((current.end + next.start) / 2).toFixed(2));
+          current.end = mid;
+          next.start = mid;
+        }
+      } else if (next.start < current.end) {
+        const mid = Number(((current.end + next.start) / 2).toFixed(2));
+        current.end = mid;
+        next.start = mid;
+      }
+      current.duration = Number((current.end - current.start).toFixed(2));
+      current.index = i;
+    }
+    segments[segments.length - 1].end = Number(totalDuration.toFixed(2));
+    segments[segments.length - 1].duration = Number(
+      (segments[segments.length - 1].end - segments[segments.length - 1].start).toFixed(2)
+    );
+    segments[segments.length - 1].index = segments.length - 1;
   }
 
   return segments;
