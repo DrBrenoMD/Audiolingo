@@ -20,6 +20,16 @@ const PORT = 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// Vercel serverless function URL normalization middleware:
+// Ensures incoming requests on Vercel retain original API endpoint paths (e.g. /api/transcribe-chunk)
+app.use((req, _res, next) => {
+  const forwardedUri = (req.headers['x-forwarded-uri'] || req.headers['x-matched-path']) as string;
+  if (forwardedUri && forwardedUri.startsWith('/api') && req.url !== forwardedUri) {
+    req.url = forwardedUri;
+  }
+  next();
+});
+
 // In-memory translation & dictionary caches for instant performance
 const translationCache = new Map<string, string>();
 const dictionaryCache = new Map<string, any>();
