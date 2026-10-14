@@ -537,9 +537,6 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
         audioRef.current.play().catch((err) => console.warn('Audio play error:', err));
       }
       setIsPlaying(true);
-      if (liveTranscriber.isSupported() && !isWebSpeechActive) {
-        startAutoWebSpeech();
-      }
     } else {
       if (audioRef.current) {
         audioRef.current.pause();
