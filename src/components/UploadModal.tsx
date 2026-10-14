@@ -20,6 +20,9 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import { Audiobook, Chapter, Sentence } from '../types';
+import { detectAcousticSentences } from '../utils/acousticSilenceDetector';
+import { PhraseLookAheadEngine } from '../utils/phraseLookAheadEngine';
+import { chunkTranscriber } from '../utils/chunkAudioTranscriber';
 
 interface UploadModalProps {
   isOpen: boolean;
@@ -164,39 +167,91 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         let estDuration = 45;
 
         try {
-          const res = await fetch('/api/transcribe-audio', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              title: item.cleanTitle,
-              providedText: i === 0 && referenceText ? referenceText : undefined,
-            }),
+          // Detecta pausas e silêncios acusticamente no navegador (Web Audio API - 100% Sem IA)
+          const segments = await detectAcousticSentences(item.file, {
+            minSilenceDuration: 0.32,
+            silenceThresholdDb: -42,
           });
 
-          if (res.ok) {
-            const data = await res.json();
-            chapterSentences = data.sentences || [];
-            summaryPt = data.summaryPt || '';
-            estDuration = data.totalDurationEstimate || (chapterSentences[chapterSentences.length - 1]?.end ?? 60);
+          if (segments && segments.length > 0) {
+            chapterSentences = PhraseLookAheadEngine.buildSentencesFromAcousticSegments(
+              segments,
+              i === 0 && referenceText ? referenceText : undefined
+            );
+            estDuration = segments[segments.length - 1].end;
+
+            // Pré-transcrição antecipada das 3 primeiras frases do primeiro capítulo
+            if (i === 0 && (!referenceText || referenceText.trim().length === 0)) {
+              setProgressStatus('Antecipando transcrição das 3 primeiras frases em 2º plano...');
+              const preloadCount = Math.min(3, chapterSentences.length);
+              for (let sIdx = 0; sIdx < preloadCount; sIdx++) {
+                const s = chapterSentences[sIdx];
+                const sDur = Math.max(0.6, s.end - s.start);
+                try {
+                  const tList = await chunkTranscriber.transcribeSlice(item.blobUrl, s.start, sDur);
+                  if (tList && tList.length > 0 && tList[0].text && tList[0].text.trim().length > 0) {
+                    chapterSentences[sIdx] = {
+                      ...s,
+                      text: tList[0].text.trim(),
+                      translationPt: tList[0].translationPt || s.translationPt,
+                      words: tList[0].words || [],
+                    };
+                  }
+                } catch (tErr) {
+                  console.warn(`Aviso de pré-transcrição frase ${sIdx}:`, tErr);
+                }
+              }
+            }
+          } else {
+            chapterSentences = Array.from({ length: 6 }, (_, sIdx) => {
+              const start = sIdx * 8;
+              const end = (sIdx + 1) * 8;
+              const text = `Phrase ${sIdx + 1}: Speech audio segment`;
+              const words = text.split(/\s+/);
+              const wDur = 8 / words.length;
+              return {
+                id: `acoustic-${i}-${sIdx + 1}`,
+                index: sIdx,
+                start,
+                end,
+                text,
+                translationPt: `Trecho de áudio #${sIdx + 1} (8.0s)`,
+                words: words.map((w, wi) => ({
+                  word: w,
+                  cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+                  start: Number((start + wi * wDur).toFixed(2)),
+                  end: Number((start + (wi + 1) * wDur).toFixed(2)),
+                  index: wi,
+                })),
+              };
+            });
+            estDuration = 48;
           }
         } catch (apiErr) {
-          console.warn(`Could not transcribe chapter ${item.cleanTitle}, fallback to basic sentences`, apiErr);
-          // Fallback minimal structure if audio is long or quota hit
-          chapterSentences = [
-            {
-              id: `s-${i}-1`,
-              index: 0,
-              start: 0,
-              end: 15,
-              text: `Chapter audio: ${item.cleanTitle}`,
-              translationPt: `Áudio do capítulo: ${item.cleanTitle}`,
-              words: [
-                { word: 'Chapter', cleanWord: 'chapter', start: 0, end: 3, index: 0 },
-                { word: 'audio', cleanWord: 'audio', start: 3.2, end: 6, index: 1 },
-                { word: item.cleanTitle, cleanWord: item.cleanTitle.toLowerCase(), start: 6.2, end: 12, index: 2 },
-              ],
-            },
-          ];
+          console.warn(`Fallback acústico para capítulo ${item.cleanTitle}:`, apiErr);
+          chapterSentences = Array.from({ length: 6 }, (_, sIdx) => {
+            const start = sIdx * 8;
+            const end = (sIdx + 1) * 8;
+            const text = `Phrase ${sIdx + 1}: Speech audio segment`;
+            const words = text.split(/\s+/);
+            const wDur = 8 / words.length;
+            return {
+              id: `acoustic-fallback-${i}-${sIdx + 1}`,
+              index: sIdx,
+              start,
+              end,
+              text,
+              translationPt: `Trecho de áudio #${sIdx + 1} (8.0s)`,
+              words: words.map((w, wi) => ({
+                word: w,
+                cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+                start: Number((start + wi * wDur).toFixed(2)),
+                end: Number((start + (wi + 1) * wDur).toFixed(2)),
+                index: wi,
+              })),
+            };
+          });
+          estDuration = 48;
         }
 
         generatedChapters.push({

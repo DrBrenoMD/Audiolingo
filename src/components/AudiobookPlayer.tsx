@@ -34,6 +34,12 @@ import { audioEngine } from '../utils/audioEngine';
 import { chunkTranscriber } from '../utils/chunkAudioTranscriber';
 import { liveTranscriber } from '../utils/liveTranscription';
 import { adjustSentenceSync, snapSentenceToCurrentTime, isPlaceholderSentence } from '../utils/fuzzyAligner';
+import { detectAcousticSentences, AcousticSegment } from '../utils/acousticSilenceDetector';
+import {
+  PhraseLookAheadEngine,
+  LookAheadPhrase,
+  getProgressiveWordsState,
+} from '../utils/phraseLookAheadEngine';
 import { SidePanel, SidePanelMode } from './SidePanel';
 import { SubtitleSyncModal } from './SubtitleSyncModal';
 import confetti from 'canvas-confetti';
@@ -85,6 +91,12 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   );
   const [dynamicSentences, setDynamicSentences] = useState<Sentence[]>([]);
 
+  // Phrase Look-Ahead Engine (3 Frases Antecipadas em Segundo Plano) & Detecção Acústica
+  const lookAheadEngineRef = useRef<PhraseLookAheadEngine>(new PhraseLookAheadEngine([], 3));
+  const [lookAheadPhrases, setLookAheadPhrases] = useState<LookAheadPhrase[]>([]);
+  const [isAcousticScanning, setIsAcousticScanning] = useState<boolean>(false);
+  const [targetedTranscribingIndex, setTargetedTranscribingIndex] = useState<number | null>(null);
+
   // UNIFIED SIDE PANEL STATE (Never covers text!)
   const [sidePanelMode, setSidePanelMode] = useState<SidePanelMode | null>(null);
   const [selectedWord, setSelectedWord] = useState<string | null>(null);
@@ -100,6 +112,72 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   const currentChapter: Chapter | undefined = audiobook?.chapters?.[currentChapterIdx];
   const activeAudioSrc: string = currentChapter?.audioUrl || audiobook?.audioUrl || '';
 
+  // Configura callbacks do LookAheadEngine
+  useEffect(() => {
+    const engine = lookAheadEngineRef.current;
+    engine.setOnQueueStatus((queue) => {
+      setLookAheadPhrases(queue);
+    });
+    engine.setOnPhraseUpdate((updated) => {
+      setDynamicSentences((prev) => {
+        const next = prev.map((s) => (s.index === updated.index ? updated : s));
+        if (onUpdateAudiobook && audiobook) {
+          onUpdateAudiobook({
+            ...audiobook,
+            sentences: next,
+            chapters: audiobook.chapters?.map((ch, idx) =>
+              idx === currentChapterIdx ? { ...ch, sentences: next } : ch
+            ),
+          });
+        }
+        return next;
+      });
+    });
+  }, [audiobook, currentChapterIdx, onUpdateAudiobook]);
+
+  // Executa o Detector Acústico de Pausas e Silêncios via Web Audio API (100% Sem IA)
+  const runAcousticPauseDetection = async () => {
+    if (!activeAudioSrc || isAcousticScanning) return;
+    setIsAcousticScanning(true);
+    try {
+      const segments = await detectAcousticSentences(activeAudioSrc, {
+        minSilenceDuration: 0.32,
+        silenceThresholdDb: -42,
+      });
+
+      if (segments && segments.length > 0) {
+        // Se já existiam frases com texto real do usuário, preserva o texto combinando com as pausas acústicas
+        const existingRealSentences = dynamicSentences
+          .filter((s) => !isPlaceholderSentence(s) && s.text.trim())
+          .map((s) => s.text);
+
+        const built = PhraseLookAheadEngine.buildSentencesFromAcousticSegments(
+          segments,
+          existingRealSentences.length > 0 ? existingRealSentences : undefined
+        );
+
+        setDynamicSentences(built);
+        lookAheadEngineRef.current.setAudioUrl(activeAudioSrc);
+        lookAheadEngineRef.current.setSentences(built);
+        lookAheadEngineRef.current.preloadLookAheadWindow(3);
+
+        if (onUpdateAudiobook && audiobook) {
+          onUpdateAudiobook({
+            ...audiobook,
+            sentences: built,
+            chapters: audiobook.chapters?.map((ch, idx) =>
+              idx === currentChapterIdx ? { ...ch, sentences: built } : ch
+            ),
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('Erro na detecção acústica:', err);
+    } finally {
+      setIsAcousticScanning(false);
+    }
+  };
+
   // Synchronize sentences when chapter or audiobook changes
   useEffect(() => {
     if (!audiobook) return;
@@ -112,13 +190,22 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
       audioRef.current.currentTime = 0;
     }
     const raw = currentChapter?.sentences || audiobook.sentences || [];
-    // Sanitize any placeholders so they don't have fake word cues
     const sanitized = raw.map((s) => (isPlaceholderSentence(s) ? { ...s, words: [] } : s));
     setDynamicSentences(sanitized);
+    lookAheadEngineRef.current.setAudioUrl(activeAudioSrc);
+    lookAheadEngineRef.current.setSentences(sanitized);
+    if (activeAudioSrc && sanitized.length > 0) {
+      lookAheadEngineRef.current.preloadLookAheadWindow(3);
+    }
 
-    // Automatically kick off transcription for the first chunk if needed
-    if (activeAudioSrc && sanitized.some((s) => isPlaceholderSentence(s))) {
-      transcribeSliceAtTime(0);
+    // Se o áudio estiver carregado e todas/maioria das frases forem placeholders (ex: "[0:00 - 0:20] Faixa de áudio"),
+    // dispara automaticamente a detecção acústica de pausas no navegador!
+    const needsAcousticScan =
+      activeAudioSrc &&
+      (sanitized.length === 0 || sanitized.every((s) => isPlaceholderSentence(s)));
+
+    if (needsAcousticScan) {
+      runAcousticPauseDetection();
     }
   }, [audiobook?.id, currentChapterIdx, activeAudioSrc]);
 
@@ -142,7 +229,7 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
   const activeSentence =
     activeSentenceIndex !== -1 ? dynamicSentences[activeSentenceIndex] : null;
 
-  const activeWordCue = activeSentence?.words.find(
+  const activeWordCue = activeSentence?.words?.find(
     (w) => currentTime >= w.start && currentTime <= w.end
   );
 
@@ -157,74 +244,117 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     }
   }, [activeWordCue?.word, isPlaying]);
 
-  // Function to transcribe a specific 20s slice on the fly
-  const transcribeSliceAtTime = async (sliceStartSec: number) => {
-    if (!activeAudioSrc) return;
-    if (transcribingSlices.has(sliceStartSec)) return;
+  // Fila de Antecipação de 3 Frases: Atualiza a cada avanço temporal
+  useEffect(() => {
+    if (dynamicSentences.length > 0) {
+      lookAheadEngineRef.current.updatePlaybackPosition(currentTime);
+    }
+  }, [currentTime, dynamicSentences.length]);
 
-    setTranscribingSlices((prev) => new Set(prev).add(sliceStartSec));
+  // Transcrição de uma frase individual específica via API de fatias ou Web Speech
+  const transcribeSpecificSentence = async (sentenceIndex: number) => {
+    const target = dynamicSentences[sentenceIndex];
+    if (!target) return;
+    setTargetedTranscribingIndex(sentenceIndex);
 
     try {
-      const newSentences = await chunkTranscriber.transcribeSlice(activeAudioSrc, sliceStartSec, 20);
-      if (newSentences && newSentences.length > 0) {
-        setDynamicSentences((prev) => {
-          // Filter out any placeholder chunks that overlap with this 20s slice window
-          const filtered = prev.filter((s) => {
-            const overlaps = Math.max(s.start, sliceStartSec - 0.5) < Math.min(s.end, sliceStartSec + 20.5);
-            return !(overlaps && isPlaceholderSentence(s));
-          });
-          const merged = [...filtered, ...newSentences].sort((a, b) => a.start - b.start);
+      if (activeAudioSrc) {
+        const dur = Math.max(0.6, target.end - target.start);
+        const res = await chunkTranscriber.transcribeSlice(activeAudioSrc, target.start, dur);
+        if (res && res.length > 0 && res[0].text && res[0].text.trim().length > 0) {
+          const updated: Sentence = {
+            ...target,
+            text: res[0].text.trim(),
+            translationPt: res[0].translationPt || target.translationPt,
+            words: res[0].words || [],
+          };
 
-          // Auto-persist transcription to audiobook state and localStorage
-          if (onUpdateAudiobook && audiobook) {
-            const updatedBook: Audiobook = {
-              ...audiobook,
-              sentences: merged,
-              chapters: audiobook.chapters?.map((ch, idx) =>
-                idx === currentChapterIdx ? { ...ch, sentences: merged } : ch
-              ),
-            };
-            onUpdateAudiobook(updatedBook);
+          setDynamicSentences((prev) => {
+            const nextList = prev.map((s, idx) => (idx === sentenceIndex ? updated : s));
+            if (onUpdateAudiobook && audiobook) {
+              onUpdateAudiobook({
+                ...audiobook,
+                sentences: nextList,
+                chapters: audiobook.chapters?.map((ch, idx) =>
+                  idx === currentChapterIdx ? { ...ch, sentences: nextList } : ch
+                ),
+              });
+            }
+            return nextList;
+          });
+          lookAheadEngineRef.current.updateSentenceTranscript(sentenceIndex, res[0].text.trim());
+          setTargetedTranscribingIndex(null);
+          return;
+        }
+      }
+
+      // Se não transcrito pelo servidor e Web Speech suportado
+      if (liveTranscriber.isSupported()) {
+        seek(target.start);
+        setIsWebSpeechActive(true);
+        liveTranscriber.startListening((text, isFinal) => {
+          if (!isFinal) {
+            setInterimSpeechText(text);
+            return;
           }
 
-          return merged;
+          if (isFinal && text.trim().length > 0) {
+            setInterimSpeechText('');
+            lookAheadEngineRef.current.updateSentenceTranscript(sentenceIndex, text.trim());
+            setDynamicSentences((prev) => {
+              const current = prev[sentenceIndex];
+              if (!current) return prev;
+              const dur = Math.max(0.6, current.end - current.start);
+              const words = text.trim().split(/\s+/).filter(Boolean);
+              const wordDur = dur / Math.max(1, words.length);
+              const updated: Sentence = {
+                ...current,
+                text: text.trim(),
+                words: words.map((w, wIdx) => ({
+                  word: w,
+                  cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+                  start: Number((current.start + wIdx * wordDur).toFixed(2)),
+                  end: Number((current.start + (wIdx + 1) * wordDur).toFixed(2)),
+                  index: wIdx,
+                })),
+              };
+
+              fetch('/api/fast-translate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: text.trim() }),
+              })
+                .then((r) => r.json())
+                .then((data) => {
+                  if (data?.translatedText) {
+                    updated.translationPt = data.translatedText;
+                    setDynamicSentences((p) => p.map((s, idx) => (idx === sentenceIndex ? updated : s)));
+                  }
+                })
+                .catch(() => {});
+
+              const nextList = prev.map((s, idx) => (idx === sentenceIndex ? updated : s));
+              if (onUpdateAudiobook && audiobook) {
+                onUpdateAudiobook({
+                  ...audiobook,
+                  sentences: nextList,
+                  chapters: audiobook.chapters?.map((ch, idx) =>
+                    idx === currentChapterIdx ? { ...ch, sentences: nextList } : ch
+                  ),
+                });
+              }
+              return nextList;
+            });
+            setTargetedTranscribingIndex(null);
+          }
         });
       }
     } catch (err) {
-      console.warn('Error transcribing slice', sliceStartSec, err);
+      console.warn('Erro ao transcrever frase individual:', err);
     } finally {
-      setTranscribingSlices((prev) => {
-        const next = new Set(prev);
-        next.delete(sliceStartSec);
-        return next;
-      });
+      setTimeout(() => setTargetedTranscribingIndex(null), 1500);
     }
   };
-
-  // Proactive Lookahead Prefetching: Transcribes current chunk AND upcoming chunks ahead of time!
-  useEffect(() => {
-    if (autoTranscribeActive && activeAudioSrc) {
-      const currentSlice = Math.floor(currentTime / 20) * 20;
-      // Proactively prefetch current slice + next 2 slices in advance (up to 40-60s ahead!)
-      const slicesToPrefetch = [
-        currentSlice,
-        currentSlice + 20,
-        currentSlice + 40,
-      ].filter((s) => s < displayDuration);
-
-      slicesToPrefetch.forEach((sliceStart) => {
-        const isPlaceholder = dynamicSentences.some(
-          (s) =>
-            Math.max(s.start, sliceStart - 0.5) < Math.min(s.end, sliceStart + 20.5) &&
-            isPlaceholderSentence(s)
-        );
-
-        if (isPlaceholder && !chunkTranscriber.hasCachedChunk(activeAudioSrc, sliceStart, 20)) {
-          transcribeSliceAtTime(sliceStart);
-        }
-      });
-    }
-  }, [isPlaying, autoTranscribeActive, Math.floor(currentTime / 6), activeAudioSrc, displayDuration, dynamicSentences.length]);
 
   // Stop Web Speech listening on unmount
   useEffect(() => {
@@ -233,70 +363,75 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
     };
   }, []);
 
-  // Native Web Speech recognition (Runs 100% in browser, Zero AI, Zero Keys)
-  const toggleWebSpeech = () => {
-    if (!isWebSpeechActive) {
-      liveTranscriber.startListening((text, isFinal) => {
-        if (!isFinal) {
-          setInterimSpeechText(text);
-          return;
-        }
+  // Transcrição Automática Nativa (Web Speech API - Zero IA, Zero Servidores)
+  const startAutoWebSpeech = () => {
+    if (!liveTranscriber.isSupported()) return;
+    setIsWebSpeechActive(true);
+    liveTranscriber.startListening((text, isFinal) => {
+      if (!isFinal) {
+        setInterimSpeechText(text);
+        return;
+      }
 
-        if (isFinal && text.trim().length > 0) {
-          setInterimSpeechText('');
-          const startTime = Math.max(0, currentTime - 3.5);
-          const endTime = Math.max(startTime + 1.0, currentTime);
-          const newSentence = liveTranscriber.createSentenceFromSpeech(
-            text,
-            startTime,
-            endTime,
-            dynamicSentences.length
-          );
+      if (isFinal && text.trim().length > 0) {
+        setInterimSpeechText('');
+        const trimmed = text.trim();
+        const sIdx = activeSentenceIndex !== -1 ? activeSentenceIndex : 0;
 
-          // Fast Portuguese translation via traditional API
+        setDynamicSentences((prev) => {
+          const current = prev[sIdx];
+          if (!current) return prev;
+          const dur = Math.max(0.6, current.end - current.start);
+          const words = trimmed.split(/\s+/).filter(Boolean);
+          const wordDur = dur / Math.max(1, words.length);
+          const updated: Sentence = {
+            ...current,
+            text: trimmed,
+            words: words.map((w, wIdx) => ({
+              word: w,
+              cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+              start: Number((current.start + wIdx * wordDur).toFixed(2)),
+              end: Number((current.start + (wIdx + 1) * wordDur).toFixed(2)),
+              index: wIdx,
+            })),
+          };
+
+          lookAheadEngineRef.current.updateSentenceTranscript(sIdx, trimmed);
+
+          // Tradução rápida sem IA
           fetch('/api/fast-translate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: text.trim() }),
+            body: JSON.stringify({ text: trimmed }),
           })
             .then((r) => r.json())
             .then((data) => {
               if (data?.translatedText) {
-                newSentence.translationPt = data.translatedText;
+                updated.translationPt = data.translatedText;
+                setDynamicSentences((p) => p.map((s, idx) => (idx === sIdx ? updated : s)));
               }
-              setDynamicSentences((prev) => {
-                const filtered = prev.filter(
-                  (s) =>
-                    !(isPlaceholderSentence(s) &&
-                      Math.max(s.start, startTime) < Math.min(s.end, endTime))
-                );
-                const merged = [...filtered, newSentence].sort((a, b) => a.start - b.start);
-                if (onUpdateAudiobook && audiobook) {
-                  onUpdateAudiobook({
-                    ...audiobook,
-                    sentences: merged,
-                    chapters: audiobook.chapters?.map((ch, idx) =>
-                      idx === currentChapterIdx ? { ...ch, sentences: merged } : ch
-                    ),
-                  });
-                }
-                return merged;
-              });
             })
-            .catch(() => {
-              setDynamicSentences((prev) => {
-                const filtered = prev.filter(
-                  (s) =>
-                    !(isPlaceholderSentence(s) &&
-                      Math.max(s.start, startTime) < Math.min(s.end, endTime))
-                );
-                const merged = [...filtered, newSentence].sort((a, b) => a.start - b.start);
-                return merged;
-              });
+            .catch(() => {});
+
+          const nextList = prev.map((s, idx) => (idx === sIdx ? updated : s));
+          if (onUpdateAudiobook && audiobook) {
+            onUpdateAudiobook({
+              ...audiobook,
+              sentences: nextList,
+              chapters: audiobook.chapters?.map((ch, idx) =>
+                idx === currentChapterIdx ? { ...ch, sentences: nextList } : ch
+              ),
             });
-        }
-      });
-      setIsWebSpeechActive(true);
+          }
+          return nextList;
+        });
+      }
+    });
+  };
+
+  const toggleWebSpeech = () => {
+    if (!isWebSpeechActive) {
+      startAutoWebSpeech();
     } else {
       liveTranscriber.stopListening();
       setIsWebSpeechActive(false);
@@ -389,6 +524,9 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
         audioRef.current.play().catch((err) => console.warn('Audio play error:', err));
       }
       setIsPlaying(true);
+      if (liveTranscriber.isSupported() && !isWebSpeechActive) {
+        startAutoWebSpeech();
+      }
     } else {
       if (audioRef.current) {
         audioRef.current.pause();
@@ -560,19 +698,24 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
 
         {/* Audiobook & Side Tools Triggers */}
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Progressive JIT Auto-Transcribe Switch */}
+          {/* Acoustic Silence & Pause Detector Trigger (Web Audio API - 100% Sem IA) */}
           {activeAudioSrc && (
             <button
-              onClick={() => setAutoTranscribeActive(!autoTranscribeActive)}
+              onClick={() => runAcousticPauseDetection()}
+              disabled={isAcousticScanning}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition ${
-                autoTranscribeActive
-                  ? 'bg-emerald-600/30 text-emerald-300 border-emerald-500/60'
-                  : 'bg-slate-800 hover:bg-slate-700 text-slate-400 border-slate-700'
+                isAcousticScanning
+                  ? 'bg-amber-600/30 text-amber-300 border-amber-500/60 cursor-wait'
+                  : 'bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border-indigo-500/40 shadow-sm'
               }`}
-              title="Transcrever automaticamente conforme a reprodução avança (trecho a trecho)"
+              title="Executar detector acústico de pausas e silêncios no navegador via Web Audio API (Zero IA)"
             >
-              <Radio className={`w-3.5 h-3.5 ${autoTranscribeActive ? 'animate-pulse text-emerald-400' : ''}`} />
-              <span>{autoTranscribeActive ? 'Transcrição Conforme Toca: On' : 'Transcrição ao Tocar: Off'}</span>
+              {isAcousticScanning ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+              ) : (
+                <Radio className="w-3.5 h-3.5 text-indigo-400" />
+              )}
+              <span>{isAcousticScanning ? 'Detectando Pausas...' : 'Segmentar Pausas Acústicas'}</span>
             </button>
           )}
 
@@ -780,12 +923,55 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
             </div>
           )}
 
+          {/* Look-Ahead Queue & Acoustic Segmentation Status Bar (3 Frases Antecipadas em Segundo Plano) */}
+          <div className="p-3.5 rounded-2xl bg-slate-900/80 border border-slate-800 text-xs flex flex-col md:flex-row items-start md:items-center justify-between gap-3 shadow-lg">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-indigo-600/20 text-indigo-400 border border-indigo-500/30 shrink-0">
+                <Radio className="w-4 h-4 text-indigo-400" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-bold text-white">
+                    {activeSentenceIndex !== -1
+                      ? `Frase Atual #${activeSentenceIndex + 1} [${formatTime(activeSentence?.start || 0)} - ${formatTime(activeSentence?.end || 0)}]`
+                      : `Segmentação Acústica: ${dynamicSentences.length} Frases`}
+                  </span>
+                  <span className="text-slate-500">·</span>
+                  <span className="text-indigo-300 font-medium">
+                    Buffer: 3 Frases Antecipadas em 2º Plano
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Detector acústico de pausas (Web Audio API) · Palavras reveladas e sincronizadas conforme o áudio toca.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0 self-end md:self-center">
+              <button
+                onClick={() => runAcousticPauseDetection()}
+                disabled={isAcousticScanning}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-700 text-xs transition flex items-center gap-1.5 font-medium"
+                title="Reanalisar o áudio e dividir pelas pausas naturais de fala via Web Audio API"
+              >
+                {isAcousticScanning ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                ) : (
+                  <Gauge className="w-3.5 h-3.5 text-indigo-400" />
+                )}
+                <span>{isAcousticScanning ? 'Analisando...' : 'Reescanear Pausas'}</span>
+              </button>
+            </div>
+          </div>
+
           {/* Sentences / Timeframes List */}
           <div className="space-y-6">
             {dynamicSentences.map((sentence, sIdx) => {
               const isCurrentSentence = activeSentenceIndex === sIdx;
-              const sliceStart = Math.floor(sentence.start / 20) * 20;
-              const isChunkTranscribing = transcribingSlices.has(sliceStart);
+              const isAnticipated =
+                activeSentenceIndex !== -1 &&
+                sIdx > activeSentenceIndex &&
+                sIdx <= activeSentenceIndex + 3;
               const isPlaceholder = isPlaceholderSentence(sentence);
 
               return (
@@ -794,13 +980,19 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                   className={`group relative p-4 rounded-2xl transition-all duration-300 border ${
                     isCurrentSentence
                       ? 'bg-slate-900/90 border-indigo-500/50 shadow-xl shadow-indigo-950/20'
+                      : isAnticipated
+                      ? 'bg-slate-900/40 border-indigo-900/40 hover:bg-slate-900/60'
                       : 'bg-slate-900/20 border-slate-800/40 hover:bg-slate-900/50 hover:border-slate-800'
                   }`}
                 >
                   {/* Sentence Header Actions */}
-                  <div className="flex items-center justify-between gap-2 mb-2">
+                  <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
                     {/* Sentence Timestamp & Sync Tuning */}
-                    <div className="flex items-center gap-1.5 flex-wrap">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[11px] font-mono text-slate-400 font-semibold">
+                        Frase #{sIdx + 1}
+                      </span>
+
                       <button
                         onClick={() => seek(sentence.start)}
                         className={`text-[11px] font-mono px-2 py-0.5 rounded transition ${
@@ -812,10 +1004,20 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                       >
                         {formatTime(sentence.start)}
                       </button>
+
                       {isCurrentSentence && (
-                        <span className="flex h-2 w-2 relative">
-                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
-                          <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
+                        <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 text-[10px] font-bold border border-indigo-500/30">
+                          <span className="relative flex h-2 w-2">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
+                          </span>
+                          Tocando Agora
+                        </span>
+                      )}
+
+                      {isAnticipated && !isCurrentSentence && (
+                        <span className="px-2 py-0.5 rounded-full bg-indigo-950/60 text-indigo-300 text-[10px] font-medium border border-indigo-800/50">
+                          ⚡ Antecipada no Buffer
                         </span>
                       )}
 
@@ -845,16 +1047,29 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition">
-                      {/* One-click Web Speech recognize if placeholder */}
-                      {isPlaceholder && liveTranscriber.isSupported() && (
+                    <div className="flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition flex-wrap">
+                      {/* Individual Phrase Web Speech Transcription Button */}
+                      {liveTranscriber.isSupported() && (
                         <button
-                          onClick={toggleWebSpeech}
-                          className="flex items-center gap-1 px-2 py-0.5 text-[11px] text-emerald-300 bg-emerald-950/40 hover:bg-emerald-950 border border-emerald-800/60 rounded transition"
-                          title="Usar reconhecimento nativo do navegador para capturar a fala deste trecho (Web Speech API - Zero IA)"
+                          onClick={() => transcribeSpecificSentence(sIdx)}
+                          disabled={targetedTranscribingIndex === sIdx}
+                          className={`flex items-center gap-1 px-2 py-0.5 text-[11px] rounded transition border ${
+                            targetedTranscribingIndex === sIdx
+                              ? 'bg-amber-600/40 text-amber-200 border-amber-500 animate-pulse'
+                              : isPlaceholder
+                              ? 'text-emerald-300 bg-emerald-950/40 hover:bg-emerald-950 border-emerald-800/60'
+                              : 'text-slate-400 hover:text-emerald-300 bg-slate-800/80 hover:bg-slate-700 border-slate-700'
+                          }`}
+                          title="Transcrever individualmente esta frase com a Web Speech API (Zero IA)"
                         >
                           <Mic className="w-3 h-3 text-emerald-400" />
-                          <span>{isWebSpeechActive ? 'Escutando...' : 'Reconhecer (Web Speech)'}</span>
+                          <span>
+                            {targetedTranscribingIndex === sIdx
+                              ? 'Escutando Frase...'
+                              : isPlaceholder
+                              ? 'Transcrever Frase'
+                              : 'Reconhecer Novamente'}
+                          </span>
                         </button>
                       )}
 
@@ -908,48 +1123,16 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                     </div>
                   </div>
 
-                  {/* English Text with Clickable Words */}
+                  {/* English Text with Progressive Real-Time Word Reveal (Sempre Exibido Antes da Leitura) */}
                   <p
                     className={`text-lg sm:text-xl font-serif leading-relaxed tracking-wide transition ${
                       blurEnglish ? 'blur-sm select-none hover:blur-none transition-all' : ''
                     }`}
                   >
-                    {isPlaceholder ? (
-                      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 py-1 font-sans not-italic">
-                        <div className="flex items-center gap-2.5 text-slate-300">
-                          <Radio className="w-4 h-4 text-amber-400 animate-pulse shrink-0" />
-                          <div>
-                            <span className="font-semibold text-sm text-slate-200">
-                              Trecho de Áudio [{formatTime(sentence.start)} - {formatTime(sentence.end)}]
-                            </span>
-                            <span className="text-xs text-slate-400 ml-2">
-                              • Aguardando legenda sincronizada ou reconhecimento de fala
-                            </span>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <button
-                            onClick={() => handleStartEditSentence(sentence)}
-                            className="flex items-center gap-1 px-2.5 py-1 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg border border-slate-700 transition"
-                            title="Digitar ou colar texto em inglês para este trecho"
-                          >
-                            <Edit3 className="w-3 h-3 text-indigo-400" />
-                            <span>Digitar Texto</span>
-                          </button>
-                          <button
-                            onClick={() => setShowSubtitleModal(true)}
-                            className="flex items-center gap-1 px-2.5 py-1 text-xs bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-800/60 text-indigo-300 hover:text-white rounded-lg transition"
-                            title="Sincronizar arquivo .srt ou livro completo"
-                          >
-                            <Upload className="w-3 h-3 text-indigo-400" />
-                            <span>Carregar .SRT</span>
-                          </button>
-                        </div>
-                      </div>
-                    ) : sentence.words && sentence.words.length > 0 ? (
+                    {sentence.words && sentence.words.length > 0 ? (
                       sentence.words.map((cue, wIdx) => {
-                        const isWordActive =
-                          currentTime >= cue.start && currentTime <= cue.end;
+                        const isWordSpoken = isCurrentSentence ? currentTime >= cue.start : true;
+                        const isWordActive = isCurrentSentence && currentTime >= cue.start && currentTime <= cue.end;
                         const isWordSelected = selectedWord === cue.cleanWord;
 
                         return (
@@ -957,11 +1140,15 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                             <span
                               ref={isWordActive ? activeWordRef : null}
                               onClick={() => handleWordClick(cue, sentence)}
-                              className={`inline cursor-pointer select-text transition-colors duration-75 rounded px-1 -mx-0.5 py-0.5 ${
+                              className={`inline cursor-pointer select-text transition-all duration-100 rounded px-1 -mx-0.5 py-0.5 ${
                                 isWordActive
-                                  ? 'bg-amber-400/35 text-amber-100 ring-1 ring-amber-400/60 shadow-sm'
+                                  ? 'bg-indigo-600 text-white font-semibold ring-2 ring-indigo-400 shadow-md shadow-indigo-900/50 scale-105 inline-block z-10'
                                   : isWordSelected
                                   ? 'bg-emerald-500/30 text-emerald-200 underline underline-offset-4 decoration-emerald-400'
+                                  : isCurrentSentence && isWordSpoken
+                                  ? 'text-slate-100 font-medium'
+                                  : isCurrentSentence && !isWordSpoken
+                                  ? 'text-slate-300 hover:text-white font-normal'
                                   : 'hover:bg-slate-800/80 text-slate-200'
                               }`}
                               title="Clique para abrir dicionário instantâneo (0ms)"
@@ -972,19 +1159,30 @@ export const AudiobookPlayer: React.FC<AudiobookPlayerProps> = ({
                         );
                       })
                     ) : (
-                      <span className="text-slate-400 font-sans text-sm italic flex items-center justify-between">
-                        <span>{sentence.text}</span>
+                      <span className="text-slate-200 font-serif leading-relaxed">
+                        {sentence.text || `Phrase #${sIdx + 1}: Speech audio segment`}
+                      </span>
+                    )}
+
+                    {/* Live recognition preview when speaking/listening */}
+                    {isCurrentSentence && interimSpeechText && (
+                      <span className="inline-flex items-center gap-1 ml-2 text-xs font-sans text-amber-300 bg-amber-950/60 px-2 py-0.5 rounded-md border border-amber-800/40 not-italic align-middle animate-pulse">
+                        <Mic className="w-3 h-3 text-amber-400 inline" />
+                        <span>{interimSpeechText}</span>
                       </span>
                     )}
                   </p>
 
-                  {/* Subtitle / Portuguese Translation */}
-                  {showPortuguese && sentence.translationPt && !isPlaceholder && (
+                  {/* Subtitle / Portuguese Translation (Exibido para suporte ao aprendizado) */}
+                  {showPortuguese && (sentence.translationPt || isAnticipated) && (
                     <p className="mt-2 text-sm text-slate-400 italic font-sans leading-relaxed border-t border-slate-800/50 pt-1.5 flex items-start gap-1.5">
                       <span className="text-[10px] uppercase font-bold text-slate-500 not-italic tracking-wider mt-0.5">
                         PT:
                       </span>
-                      <span>{sentence.translationPt}</span>
+                      <span>
+                        {sentence.translationPt ||
+                          `Trecho de áudio antecipado #${sIdx + 1} pronto para reprodução.`}
+                      </span>
                     </p>
                   )}
                 </div>

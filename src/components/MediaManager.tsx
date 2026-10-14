@@ -24,6 +24,8 @@ import {
 import { Audiobook, Chapter, Sentence } from '../types';
 import { extractBookFromFile } from '../utils/textExtractor';
 import { alignTextToAudio } from '../utils/fuzzyAligner';
+import { detectAcousticSentences } from '../utils/acousticSilenceDetector';
+import { PhraseLookAheadEngine } from '../utils/phraseLookAheadEngine';
 
 interface MediaManagerProps {
   audiobooks: Audiobook[];
@@ -230,19 +232,72 @@ export const MediaManager: React.FC<MediaManagerProps> = ({
           leadInSeconds: leadInSeconds || 0.0,
         });
       } else {
-        // Timeframe chunks for audio playback & native browser speech recognition
-        const chunkCount = Math.max(1, Math.ceil(audioDuration / 20));
-        const sentences = Array.from({ length: chunkCount }, (_, i) => {
-          const sMin = Math.floor((i * 20) / 60);
-          const sSec = Math.floor((i * 20) % 60);
-          const eMin = Math.floor(Math.min(audioDuration, (i + 1) * 20) / 60);
-          const eSec = Math.floor(Math.min(audioDuration, (i + 1) * 20) % 60);
-          const timeTag = `${sMin}:${sSec.toString().padStart(2, '0')} - ${eMin}:${eSec.toString().padStart(2, '0')}`;
-          return `[${timeTag}] Faixa de áudio`;
-        });
-        alignedSentences = alignTextToAudio(sentences, audioDuration, {
-          leadInSeconds: leadInSeconds || 0.0,
-        });
+        // Detecção Acústica no Navegador (Web Audio API - 100% Sem IA)
+        setProcessStatus('Analisando sinal sonoro e detectando pausas/silêncios da fala no navegador...');
+        try {
+          const acousticSegments = await detectAcousticSentences(uploadAudioFile, {
+            minSilenceDuration: 0.32,
+            silenceThresholdDb: -42,
+          });
+
+          if (acousticSegments && acousticSegments.length > 0) {
+            alignedSentences = PhraseLookAheadEngine.buildSentencesFromAcousticSegments(acousticSegments);
+          } else {
+            // Fallback caso não detecte pausas
+            const chunkDur = 8.0;
+            const count = Math.max(1, Math.ceil(audioDuration / chunkDur));
+            alignedSentences = Array.from({ length: count }, (_, i) => {
+              const start = Number((i * chunkDur).toFixed(2));
+              const end = Number(Math.min(audioDuration, (i + 1) * chunkDur).toFixed(2));
+              const text = `Phrase ${i + 1}: Speech audio segment`;
+              const words = text.split(/\s+/);
+              const dur = Math.max(0.5, end - start);
+              const wDur = dur / words.length;
+              return {
+                id: `acoustic-phrase-${i + 1}`,
+                index: i,
+                start,
+                end,
+                text,
+                translationPt: `Trecho de áudio #${i + 1} (${dur.toFixed(1)}s)`,
+                words: words.map((w, wi) => ({
+                  word: w,
+                  cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+                  start: Number((start + wi * wDur).toFixed(2)),
+                  end: Number((start + (wi + 1) * wDur).toFixed(2)),
+                  index: wi,
+                })),
+              };
+            });
+          }
+        } catch (acousticErr) {
+          console.warn('Erro na detecção acústica ao importar, usando segmentação temporal:', acousticErr);
+          const chunkDur = 8.0;
+          const count = Math.max(1, Math.ceil(audioDuration / chunkDur));
+          alignedSentences = Array.from({ length: count }, (_, i) => {
+            const start = Number((i * chunkDur).toFixed(2));
+            const end = Number(Math.min(audioDuration, (i + 1) * chunkDur).toFixed(2));
+            const text = `Phrase ${i + 1}: Speech audio segment`;
+            const words = text.split(/\s+/);
+            const dur = Math.max(0.5, end - start);
+            const wDur = dur / words.length;
+            return {
+              id: `acoustic-phrase-${i + 1}`,
+              index: i,
+              start,
+              end,
+              text,
+              translationPt: `Trecho de áudio #${i + 1} (${dur.toFixed(1)}s)`,
+              words: words.map((w, wi) => ({
+                word: w,
+                cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
+                start: Number((start + wi * wDur).toFixed(2)),
+                end: Number((start + (wi + 1) * wDur).toFixed(2)),
+                index: wi,
+              })),
+            };
+          });
+        }
       }
 
       const newId = `custom-${Date.now()}`;

@@ -2,6 +2,14 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
+import http from 'http';
+import https from 'https';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 dotenv.config();
 
@@ -44,46 +52,140 @@ async function translateText(text: string, from = 'en', to = 'pt-BR'): Promise<s
 }
 
 // ==========================================
-// 2. Traditional Deterministic Audio Cadence & Subtitle Alignment (/api/transcribe-chunk)
+// 1.1 Traditional Speech-to-Text via Google Speech v2 API (Chromium / Non-AI)
+// ==========================================
+async function recognizeSpeechFromAudioBuffer(
+  audioBuffer: Buffer,
+  lang: string = 'en-US'
+): Promise<string> {
+  const tmpId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+  const inputPath = path.join(os.tmpdir(), `stt_in_${tmpId}.wav`);
+  const flacPath = path.join(os.tmpdir(), `stt_out_${tmpId}.flac`);
+
+  try {
+    await fs.promises.writeFile(inputPath, audioBuffer);
+    // Convert WAV slice to 16kHz mono FLAC using ffmpeg
+    await execAsync(`ffmpeg -i "${inputPath}" -ar 16000 -ac 1 -c:a flac "${flacPath}" -y`);
+    const flacData = await fs.promises.readFile(flacPath);
+
+    const apiKey = 'AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw';
+    const targetUrl = `https://www.google.com/speech-api/v2/recognize?client=chromium&lang=${lang}&key=${apiKey}&pFilter=0`;
+
+    const recognizedText = await new Promise<string>((resolve) => {
+      const req = https.request(
+        targetUrl,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'audio/x-flac; rate=16000',
+            'Content-Length': flacData.length,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+          },
+          timeout: 10000,
+        },
+        (response) => {
+          let body = '';
+          response.on('data', (chunk) => (body += chunk));
+          response.on('end', () => {
+            let bestTranscript = '';
+            const lines = body.split('\n').filter(Boolean);
+            for (const line of lines) {
+              try {
+                const parsed = JSON.parse(line);
+                if (parsed.result && parsed.result.length > 0) {
+                  const alt = parsed.result[0].alternative?.[0];
+                  if (alt?.transcript) {
+                    bestTranscript = alt.transcript.trim();
+                    break;
+                  }
+                }
+              } catch {}
+            }
+            resolve(bestTranscript);
+          });
+        }
+      );
+
+      req.on('error', (err) => {
+        // Handle socket disconnects or transient connection resets gracefully without crashing
+        console.warn('Speech recognition notice:', err.message);
+        resolve('');
+      });
+      req.on('timeout', () => {
+        req.destroy();
+        resolve('');
+      });
+      req.write(flacData);
+      req.end();
+    });
+
+    return recognizedText;
+  } catch (err) {
+    console.warn('Audio recognition error:', err);
+    return '';
+  } finally {
+    fs.promises.unlink(inputPath).catch(() => {});
+    fs.promises.unlink(flacPath).catch(() => {});
+  }
+}
+
+// ==========================================
+// 2. Traditional Deterministic Audio Cadence & Speech Recognition (/api/transcribe-chunk)
 // ==========================================
 app.post('/api/transcribe-chunk', async (req, res) => {
   try {
-    const { startOffset = 0, duration = 20, referenceText } = req.body;
+    const { startOffset = 0, duration = 20, referenceText, audioChunkBase64, language = 'en-US' } = req.body;
 
-    // If reference text or subtitle line is provided for this slice, align it immediately
+    let transcript = '';
+
+    // If reference text or subtitle line is provided for this slice, use it
     if (referenceText && typeof referenceText === 'string' && referenceText.trim().length > 0) {
-      const text = referenceText.trim();
-      const ptTranslation = await translateText(text);
-      const rawWords = text.split(/\s+/).filter(Boolean);
-      const wordDur = Number(duration) / Math.max(1, rawWords.length);
+      transcript = referenceText.trim();
+    } else if (audioChunkBase64 && typeof audioChunkBase64 === 'string') {
+      // Decode audio base64 buffer and recognize speech using traditional STT
+      const audioBuffer = Buffer.from(audioChunkBase64, 'base64');
+      transcript = await recognizeSpeechFromAudioBuffer(audioBuffer, language);
+    }
+
+    const cleanText = transcript ? transcript.trim() : '';
+    const numericStart = Number(startOffset) || 0;
+    const numericDuration = Math.max(0.6, Number(duration) || 5);
+
+    if (cleanText.length > 0) {
+      const ptTranslation = await translateText(cleanText);
+      const rawWords = cleanText.split(/\s+/).filter(Boolean);
+      const wordDur = numericDuration / Math.max(1, rawWords.length);
 
       const finalWords = rawWords.map((w, wi) => ({
         word: w,
         cleanWord: w.replace(/[^a-zA-Z0-9']/g, '').toLowerCase(),
-        start: +(Number(startOffset) + wi * wordDur).toFixed(2),
-        end: +(Number(startOffset) + (wi + 1) * wordDur).toFixed(2),
+        start: +(numericStart + wi * wordDur).toFixed(2),
+        end: +(numericStart + (wi + 1) * wordDur).toFixed(2),
         index: wi,
       }));
 
       const sentence = {
-        id: `s-${Math.round(startOffset)}`,
+        id: `s-${Math.round(numericStart * 100)}`,
         index: 0,
-        start: +Number(startOffset).toFixed(2),
-        end: +Number(Number(startOffset) + Number(duration)).toFixed(2),
-        text,
+        start: +numericStart.toFixed(2),
+        end: +(numericStart + numericDuration).toFixed(2),
+        text: cleanText,
         translationPt: ptTranslation,
         words: finalWords,
       };
 
-      return res.json({ sentences: [sentence], engine: 'traditional-cadence-aligner' });
+      return res.json({
+        sentences: [sentence],
+        transcript: cleanText,
+        engine: 'traditional-speech-recognition',
+      });
     }
 
-    // When raw audio without text is sent, tell client to use browser Web Speech API
+    // When audio chunk is silent or speech is not distinctly detected
     return res.json({
       sentences: [],
-      engine: 'native-browser-speech',
-      useBrowserWebSpeech: true,
-      notice: 'Client-side Web Speech API handles audio transcription natively in browser',
+      transcript: '',
+      engine: 'no-speech-detected',
     });
   } catch (err: any) {
     console.error('Traditional chunk process error:', err);

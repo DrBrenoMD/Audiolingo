@@ -39,11 +39,6 @@ export class ChunkAudioTranscriber {
     startSec: number,
     durationSec: number = 20
   ): Promise<Sentence[]> {
-    // If the deployment returned 404 for the API, avoid spamming requests
-    if (this.has404Error) {
-      return [];
-    }
-
     const chunkKey = `${blobUrl}_${Math.floor(startSec)}_${Math.floor(durationSec)}`;
 
     if (chunkResultsCache.has(chunkKey)) {
@@ -61,17 +56,17 @@ export class ChunkAudioTranscriber {
       const actualEnd = Math.min(audioBuffer.duration, startSec + durationSec);
       const actualDuration = actualEnd - startSec;
 
-      if (actualDuration <= 0.5) {
+      if (actualDuration <= 0.4) {
         return [];
       }
 
-      // 1. Slice audio in-browser down to a compact 16kHz WAV blob (~400KB - 800KB)
+      // 1. Slice audio in-browser down to a compact 16kHz WAV blob
       const wavBlob = sliceAudioBufferToWavBlob(audioBuffer, startSec, actualEnd, 16000);
 
       // 2. Convert to base64
       const base64 = await blobToBase64(wavBlob);
 
-      // 3. Send slice to backend for ultra-fast transcription
+      // 3. Send slice to backend for speech recognition
       const res = await fetch('/api/transcribe-chunk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -82,17 +77,6 @@ export class ChunkAudioTranscriber {
           duration: actualDuration,
         }),
       });
-
-      if (res.status === 404) {
-        this.has404Error = true;
-        if (!this.warned404) {
-          console.warn(
-            '[EchoLingo] A rota /api/transcribe-chunk retornou 404. Na Vercel, certifique-se de implantar com vercel.json e api/index.ts configurados.'
-          );
-          this.warned404 = true;
-        }
-        return [];
-      }
 
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
@@ -107,7 +91,7 @@ export class ChunkAudioTranscriber {
 
       return sentences;
     } catch (err) {
-      console.warn(`Chunk transcribe error for [${startSec}s - ${startSec + durationSec}s]:`, err);
+      console.warn(`Chunk transcribe notice for [${startSec}s - ${startSec + durationSec}s]:`, err);
       return [];
     } finally {
       this.activeJobs.delete(chunkKey);
